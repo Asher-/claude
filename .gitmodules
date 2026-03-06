@@ -1,0 +1,21 @@
+[submodule "claude-law-app"]
+	path = claude-law-app
+	url = ./claude-law-app/
+[submodule "claude-law"]
+	path = claude-law
+	url = ./claude-law
+[submodule "lacan"]
+	path = lacan
+	url = ./lacan/
+[submodule "onshape-mcp"]
+	path = onshape-mcp
+	url = ./onshape-mcp/
+[submodule "macos/claude-code"]
+	path = macos/claude-code
+	url = git@github.com:Asher-/claude-code.git
+[submodule "hopper-mcp"]
+	path = hopper-mcp
+	url = git@github.com:Asher-/claude-hopper-mcp.git
+[submodule "speakers"]
+	path = speakers
+	url = git@github.com:Asher-/speakers.git
