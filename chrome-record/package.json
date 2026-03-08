@@ -1,0 +1,16 @@
+{
+  "name": "chrome-record",
+  "version": "0.1.0",
+  "description": "Record Chrome browser activity to MP4 offscreen via CDP screencast",
+  "type": "module",
+  "bin": {
+    "chrome-record": "./bin/chrome-record.js"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "commander": "^13.0.0",
+    "puppeteer-core": "^24.0.0"
+  }
+}
