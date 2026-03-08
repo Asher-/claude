@@ -7,9 +7,6 @@
 [submodule "lacan"]
 	path = lacan
 	url = ./lacan/
-[submodule "onshape-mcp"]
-	path = onshape-mcp
-	url = ./onshape-mcp/
 [submodule "macos/claude-code"]
 	path = macos/claude-code
 	url = git@github.com:Asher-/claude-code.git
@@ -37,3 +34,6 @@
 [submodule "skills"]
 	path = skills
 	url = ./skills/
+[submodule "strongai"]
+	path = strongai
+	url = git@github.com:StrongAI/claude-strongai.git
