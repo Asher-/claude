@@ -34,3 +34,6 @@
 [submodule "db/statements"]
 	path = db/statements
 	url = git@github.com:StrongAI/claude-db-statements.git
+[submodule "skills"]
+	path = skills
+	url = ./skills/
