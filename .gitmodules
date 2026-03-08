@@ -19,3 +19,18 @@
 [submodule "speakers"]
 	path = speakers
 	url = git@github.com:Asher-/speakers.git
+[submodule "photography"]
+	path = photography
+	url = git@github.com:Asher-/claude-photography.git
+[submodule "csgo"]
+	path = csgo
+	url = git@github.com:XNN-LLC/csgo-cs2-server-build-1-click.git
+[submodule "mcp/statement"]
+	path = mcp/statement
+	url = git@github.com:StrongAI/claude-statement-mcp.git
+[submodule "db/core"]
+	path = db/core
+	url = git@github.com:StrongAI/claude-db-core.git
+[submodule "db/statements"]
+	path = db/statements
+	url = git@github.com:StrongAI/claude-db-statements.git
