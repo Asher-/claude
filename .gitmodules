@@ -21,7 +21,7 @@
 	url = git@github.com:Asher-/speakers.git
 [submodule "photography"]
 	path = photography
-	url = git@github.com:Asher-/claude-photography.git
+	url = git@github.com:StrongAI/claude-photography.git
 [submodule "csgo"]
 	path = csgo
 	url = git@github.com:XNN-LLC/csgo-cs2-server-build-1-click.git
