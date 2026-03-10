@@ -37,3 +37,6 @@
 [submodule "strongai"]
 	path = strongai
 	url = git@github.com:StrongAI/claude-strongai.git
+[submodule "development_loopback"]
+	path = development_loopback
+	url = git@github.com:Asher-/development-loopback.git
