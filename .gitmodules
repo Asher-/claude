@@ -33,7 +33,7 @@
 	url = git@github.com:StrongAI/claude-db-statements.git
 [submodule "skills"]
 	path = skills
-	url = ./skills/
+	url = git@github.com:Asher-/claude-skills.git
 [submodule "strongai"]
 	path = strongai
 	url = git@github.com:StrongAI/claude-strongai.git
