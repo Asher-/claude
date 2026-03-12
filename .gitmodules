@@ -40,3 +40,6 @@
 [submodule "development_loopback"]
 	path = development_loopback
 	url = git@github.com:Asher-/development-loopback.git
+[submodule "scripts"]
+	path = scripts
+	url = git@github.com:StrongAI/claude-scripts.git
