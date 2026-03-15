@@ -43,3 +43,6 @@
 [submodule "scripts"]
 	path = scripts
 	url = git@github.com:StrongAI/claude-scripts.git
+[submodule "serena"]
+	path = serena
+	url = git@github.com:Asher-/serena.git
