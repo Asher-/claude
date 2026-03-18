@@ -52,3 +52,6 @@
 [submodule "brain"]
 	path = brain
 	url = git@github.com:StrongAI/claude-brain.git
+[submodule "deleuze_guattari"]
+	path = deleuze_guattari
+	url = git@github.com:StrongAI/claude-deleuze_guattari.git
