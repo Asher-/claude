@@ -52,6 +52,3 @@
 [submodule "brain"]
 	path = brain
 	url = git@github.com:StrongAI/claude-brain.git
-[submodule "tools"]
-	path = tools
-	url = git@github.com:StrongAI/claude-tools.git
