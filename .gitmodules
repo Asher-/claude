@@ -46,3 +46,6 @@
 [submodule "mcp/context"]
 	path = mcp/context
 	url = git@github.com:StrongAI/claude-mcp-context.git
+[submodule "brain"]
+	path = brain
+	url = git@github.com:StrongAI/claude-brain.git
