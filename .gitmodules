@@ -1,27 +1,24 @@
 [submodule "claude-law-app"]
 	path = claude-law-app
-	url = ./claude-law-app/
+	url = git@github.com:StrongAI/claude-law-app.git
 [submodule "claude-law"]
 	path = claude-law
-	url = ./claude-law
+	url = git@github.com:StrongAI/claude-law.git
 [submodule "lacan"]
 	path = lacan
-	url = ./lacan/
+	url = git@github.com:StrongAI/claude-lacan.git
 [submodule "macos/claude-code"]
 	path = macos/claude-code
-	url = git@github.com:Asher-/claude-code.git
+	url = git@github.com:StrongAI/claude-code.git
 [submodule "hopper-mcp"]
 	path = hopper-mcp
-	url = git@github.com:Asher-/claude-hopper-mcp.git
+	url = git@github.com:StrongAI/claude-hopper-mcp.git
 [submodule "speakers"]
 	path = speakers
 	url = git@github.com:Asher-/speakers.git
 [submodule "photography"]
 	path = photography
 	url = git@github.com:StrongAI/claude-photography.git
-[submodule "csgo"]
-	path = csgo
-	url = git@github.com:XNN-LLC/csgo-cs2-server-build-1-click.git
 [submodule "mcp/statement"]
 	path = mcp/statement
 	url = git@github.com:StrongAI/claude-statement-mcp.git
@@ -33,7 +30,7 @@
 	url = git@github.com:StrongAI/claude-db-statements.git
 [submodule "skills"]
 	path = skills
-	url = git@github.com:Asher-/claude-skills.git
+	url = git@github.com:StrongAI/claude-skills.git
 [submodule "strongai"]
 	path = strongai
 	url = git@github.com:StrongAI/claude-strongai.git
