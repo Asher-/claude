@@ -55,3 +55,6 @@
 [submodule "ocr"]
 	path = ocr
 	url = git@github.com:Asher-/macos-vision-ocr.git
+[submodule "linguistics"]
+	path = linguistics
+	url = git@github.com:StrongAI/claude-linguistics.git
