@@ -13,6 +13,9 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 - [GetOrCreateCachedGammaCurve (sub_662864)](#getorcreatecachedgammacurve-sub_662864)
 - [cr_tone_curve::ChannelToCurve (sub_b9e6c4)](#cr_tone_curvechanneltocurve-sub_b9e6c4)
 - [LUT Evaluation Engine](#lut-evaluation-engine)
+- [Object Layouts](#object-layouts)
+- [Virtual Dispatch Map](#virtual-dispatch-map)
+- [BuildColorProfileFromSpec (sub_a4b740)](#buildcolorprofilefromspec-sub_a4b740)
 - [Implications](#implications)
 - [Remaining Work](#remaining-work)
 
@@ -37,6 +40,15 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 | `0xafe02c`  | (TileStatisticsCollector)     |  65 |  1652 | Collects tile statistics records (0x108 bytes each) by tag           |
 | `0xafe7c0`  | (ScopedTimerEnd)              | —   | —     | Ends scoped timing section                                           |
 | `0xb05b0c`  | (TopLevelStagePipeline)       | 333 |  9360 | Top-level stage pipeline, also calls ComputeAutoGamma                |
+| `0x9bc088`  | InitEvaluatorBase             |   1 |    48 | Base class constructor: sets vtable, LUT resolution=256, defaults    |
+| `0x6971f8`  | Destroy3CurveEvaluator        |  12 |   236 | Destructor: releases curve objects, vectors, base class cleanup      |
+| `0xa4b740`  | BuildColorProfileFromSpec     |  25 |   524 | Color profile factory: illuminant + primaries + gamma → profile      |
+| `0x662264`  | CachedColorProfileFactory     |  11 |   676 | Thread-safe cached factory for color profile objects (0x130 bytes)   |
+| `0x66d97c`  | ApplyEvaluatorToData          |   4 |   200 | Alternate evaluation path (arg4 < 2): single-curve LUT application   |
+| `0x6625f4`  | BuildGammaOnlyProfile         | —   | —     | Builds a gamma-only color profile (when illuminant type == 1)        |
+| `0xbb7410`  | (LUTApplicationDispatch)      |   7 |   280 | Dispatches LUT application: arg4≥2 → multi-curve, else → single      |
+| `0x66b6d4`  | (SingleCurveEvaluatorInit)    |   6 |   212 | Creates 0x70-byte single-curve evaluator with LUT + shared_ptr       |
+| `0x9bd3ac`  | (NormalizeCurveType)          |   1 |    44 | Maps curve types: 3→3, >2→2, else XOR with 1                         |
 
 ## Vtables
 
@@ -46,7 +58,10 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 | `0x7c8ac00` | vtable_GammaCurve_SharedPtrCtrlBlock | 32 bytes    | `{vtable, refcount, weakcount, raw_ptr}`       |
 | `0x7c8bb18` | vtable_3CurveEvaluator               | —           | LUT resolution 256                             |
 | `0x7cb1990` | vtable_CachedLUTWrapper              | 64+32 bytes | Cached LUT representation + shared_ptr wrapper |
-| `0x7ca1c88` | vtable_EvaluatorBaseClass            | —           | Base class for curve evaluators                |
+| `0x7ca1c88` | vtable_EvaluatorBaseClass            | ≥0x24 bytes | Base class for curve evaluators                |
+| `0x7c8aac8` | vtable_ColorProfile                  | 0x130 bytes | Color profile: illuminant + primaries + gamma  |
+| `0x7c8abb0` | vtable_ColorProfile_SharedPtrCtrlBlk | 32 bytes    | `{vtable, refcount, weakcount, raw_ptr}`       |
+| `0x7c8d2e0` | vtable_SingleCurveWrapper            | —           | Used in single-curve evaluator init            |
 
 ## Constants
 
@@ -263,6 +278,139 @@ max ~19 control points per channel
 
 ---
 
+## Object Layouts
+
+### EvaluatorBase (InitEvaluatorBase at 0x9bc088)
+
+```
++0x00: void*   vtable          (0x7ca1c88)
++0x08: int32   flags           (init: 0)
++0x0c: uint16  lutResolution   (init: 0x100 = 256)
++0x10: int32   evaluationMode  (init: 4)
++0x14: uint16  isEnabled       (init: 1)
++0x18: void*   curveData       (init: null)
++0x20: uint8   isDirty         (init: 0)
+```
+
+Minimum size: ~0x24. All evaluator subclasses call InitEvaluatorBase first, then overwrite the vtable pointer with their own.
+
+### 3CurveEvaluator (Init3CurveEvaluator at 0x676ae8)
+
+Total size: **0x1A0 (416 bytes)**. Mode argument (bit 0) selects direct vs indirect evaluation.
+
+```
++0x00:  void*    vtable              (overwritten to 0x7c8bb18)
++0x08–0x20: EvaluatorBase fields
++0x28:  void*    sharedResource      (released in destructor)
++0x30:  vector   lutBuffer1          (0x20 bytes, capacity 0x1000 = 4096)
++0x50:  vector   lutBuffer2          (ditto)
++0x70:  vector   lutBuffer3          (ditto)
++0x90:  void*    curveObject1        (direct mode: wrapped curve; released in destructor)
++0xD8:  void*    curveObject2        (ditto)
++0x120: void*    curveObject3        (ditto)
++0x168: void*    auxRef1             (released in destructor)
++0x170: void*    auxRef2             (released in destructor)
++0x178: void*    auxRef3             (released in destructor)
++0x180: int32    transferFuncType1   (2 or 3, from Configure3CurveEvaluator)
++0x184: int32    transferFuncType2   (2 or 3)
++0x188: int32    transferFuncType3   (2 or 3)
++0x19c: uint8    mode                (1=direct, 0=indirect)
+```
+
+**Direct mode** (mode=1): Curves stored at +0x90/+0xD8/+0x120 as wrapped curve objects; evaluation deferred.
+**Indirect mode** (mode=0): LUT resolution set to 256; `Configure3CurveEvaluator` calls `EvaluateCurveToLUT` three times to pre-fill LUT buffers at +0x30/+0x50/+0x70.
+
+### ColorProfile (CachedColorProfileFactory at 0x662264)
+
+Total size: **0x130 (304 bytes)**. Vtable at `0x7c8aac8`.
+
+```
++0x00:  void*    vtable          (0x7c8aac8)
+...     (matrix data from sub_65b600 + sub_111abd4)
++0x128: void*    gammaCurve      (GammaCurve or null)
+```
+
+Created from illuminant whitepoint + RGB primaries + gamma curve. Thread-safe global cache at `0x8001a70` (mutex-protected).
+
+---
+
+## Virtual Dispatch Map
+
+Two distinct class hierarchies participate in the LUT pipeline.
+
+### Curve Hierarchy (mathematical functions)
+
+Objects: GammaCurve (24 bytes), and other curve types. Used as `arg2` in `EvaluateCurveToLUT`.
+
+| Offset | Slot | Method                          | Evidence                                                                           |
+| :----- | ---: | :------------------------------ | :--------------------------------------------------------------------------------- |
+| +0x00  |    0 | Complete destructor             | Standard Itanium ABI                                                               |
+| +0x08  |    1 | Deleting destructor / release   | Called in destructor cleanup, EvaluateCurveToLUT buffer swap                       |
+| +0x10  |    2 | getOrShareBuffer(size) → void*  | EvaluateCurveToLUT arg1: allocates, returns object with data at +0x10              |
+| +0x18  |    3 | **evaluate(double x) → double** | EvaluateCurveToLUT arg2: core evaluation, called in direct loop and adaptive modes |
+
+Note: vtable+0x10 on different curve types may serve different roles (buffer management vs isEmpty check) depending on the subclass hierarchy branch.
+
+### Evaluator Hierarchy (pipeline objects)
+
+Objects: EvaluatorBase → 3CurveEvaluator (0x1A0 bytes), and other subclasses. These manage 3 curves and their pre-computed LUTs.
+
+The evaluator objects are primarily operated on through **non-virtual** methods (`InitEvaluatorBase`, `Configure3CurveEvaluator`, `EvaluateCurveToLUT`). Virtual dispatch appears limited to:
+
+| Offset | Slot | Method              | Evidence                                                 |
+| :----- | ---: | :------------------ | :------------------------------------------------------- |
+| +0x00  |    0 | Destructor          | Standard Itanium ABI; Destroy3CurveEvaluator at 0x6971f8 |
+| +0x08  |    1 | Deleting destructor | Called on contained objects during cleanup               |
+
+The evaluator hierarchy vtable appears smaller than expected — most functionality is dispatched through direct calls rather than virtual methods, with polymorphism handled at the **curve level** rather than the evaluator level.
+
+---
+
+## BuildColorProfileFromSpec (sub_a4b740)
+
+**Signature** (reconstructed):
+```cpp
+bool BuildColorProfileFromSpec(
+    void* colorSpaceSpec,    // r0 → r20 — struct with illuminant/primaries/gamma fields
+    void* arg1,              // r1 — passed to sub_3f65b0
+    void** outProfile        // r2 → r19 — receives the color profile object
+);
+```
+
+### Logic
+
+1. Checks `spec[0x14]` — if `0xffff`, enters **gamma-based** path
+2. Loads gamma value from `spec + 0x58` (`spec[0xb]` as double)
+3. If gamma > -0.4, calls `GetOrCreateCachedGammaCurve(gamma)` → GammaCurve*
+4. Two-level switch selects illuminant and primaries:
+
+   **Illuminant** (from `spec[0x0]`):
+| Value | Illuminant | Whitepoint (x, y)  |
+| :---- | :--------- | :----------------- |
+|     0 | (identity) | —                  |
+|     1 | sRGB/D65   | (0.3127, 0.3127)   |
+|     2 | Custom     | from spec+0x08     |
+|     3 | D50        | (0.314, 0.314)     |
+|     4 | Other      | from data constant |
+
+   **Primaries** (from `spec[0x6]`):
+| Value   | Standard  | R          | G          | B          |
+| :------ | :-------- | :--------- | :--------- | :--------- |
+|       1 | sRGB      | from data  | (0.30, ?)  | (0.15, ?)  |
+|       2 | Custom    | from spec  | from spec  | from spec  |
+|       3 | (none)    | —          | —          | —          |
+|       4 | Adobe RGB | (0.708, ?) | (0.17, ?)  | (0.131, ?) |
+| default | Rec.709   | (0.68, ?)  | (0.265, ?) | (0.15, ?)  |
+
+5. Calls `CachedColorProfileFactory(whitepoint, primariesR, primariesG, primariesB, gammaCurve)` → profile
+6. If `spec[0x0]` == 1 (direct gamma), calls `BuildGammaOnlyProfile(gammaCurve)` instead
+
+### Key Insight
+
+This function is the **bridge between the auto-gamma pipeline and the color management system**. The GammaCurve objects produced by `ComputeAutoGamma` and `GetOrCreateCachedGammaCurve` flow into color profiles that combine gamma correction with illuminant adaptation and gamut mapping.
+
+---
+
 ## Implications
 
 ### From prior sessions (1-18)
@@ -299,18 +447,33 @@ max ~19 control points per channel
 27. **ApplyPreprocessingForFirefly** performs WB + linearToNonLinear (fp32), then domain stretch, then optional auto-gamma — the full preprocessing chain for generative AI input
 28. **Domain stretch is computed twice**: once inside ComputeAutoGamma from tile statistics, and once inside the Firefly preprocessor from per-channel bounds extraction — same float[3] table format
 
+### New (29-36)
+
+29. **EvaluatorBase is a thin base class** (~0x24 bytes) initialized by `InitEvaluatorBase` — sets vtable, LUT resolution=256, default flags. All evaluator subclasses inherit this layout.
+30. **3CurveEvaluator is 0x1A0 (416) bytes** with a mode bit at +0x19c selecting between direct (curves at +0x90/+0xD8/+0x120) and indirect (pre-filled LUTs at +0x30/+0x50/+0x70) evaluation.
+31. **Two class hierarchies** participate: curve objects (GammaCurve etc.) with vtable+0x18 = evaluate(double→double), and evaluator objects (3CurveEvaluator etc.) that manage curve collections and LUT caches. Polymorphism lives at the curve level; evaluators dispatch mostly through direct calls.
+32. **BuildColorProfileFromSpec** is a color profile factory that combines illuminant + primaries + gamma into cached color space objects — the bridge from auto-gamma to full color management.
+33. **Color profiles are 0x130 bytes** with the GammaCurve stored at +0x128, cached in a global thread-safe map at 0x8001a70. Separate cache from gamma curves (0x8001a98).
+34. **Illuminant/primaries selection** follows standard color science: sRGB/D65 (0.3127), D50 (0.314), Adobe RGB (0.708/0.17/0.131), Rec.709 (0.68/0.265/0.15), plus custom values from the spec struct.
+35. **LUT application dispatches** in sub_bb7410 based on arg4: ≥2 goes to multi-curve path (sub_bb6384, 56 BBs), <2 goes to single-curve path (sub_66d97c → sub_66b6d4).
+36. **The -0.4 gamma threshold** appears in both ComputeAutoGamma (secondary gamma decision) and BuildColorProfileFromSpec (gamma range check), reinforcing this as a system-wide under-exposure boundary.
+
 ---
 
 ## Remaining Work
 
 - [ ] **sub_bb2948** (205 BBs): Assembly trace of full call sequence and domain transforms. Too large to decompile.
-- [ ] **sub_66d97c**: Alternate evaluation path used by sub_bb7410 when arg4==1.
+- [x] **sub_66d97c**: Alternate evaluation path — decompiled. Single-curve path for arg4 < 2.
 - [ ] **sub_bb458c, sub_bb4840**: The two resolution paths in Get1dFunctionIds.
 - [ ] **sub_686d38 cache internals**: sub_410538 (cache lookup) and sub_6870e0 (cache insert).
-- [ ] **Vtable method mapping**: evaluator base class (0x7ca1c88) and 3-curve evaluator (0x7c8bb18) virtual methods.
+- [x] **Vtable method mapping**: Both hierarchies documented. Curve vtable: +0x18=evaluate(double→double). Evaluators use mostly non-virtual dispatch.
 - [x] **sub_8f4370**: ApplyPreprocessingForFirefly — decompiled and documented.
-- [ ] **sub_a4b740**: Caller of GetOrCreateCachedGammaCurve — understand when the cached path is used vs the direct ComputeAutoGamma path.
+- [x] **sub_a4b740**: BuildColorProfileFromSpec — color profile factory bridging gamma to full color management. Decompiled and documented.
 - [ ] **sub_afe02c** (65 BBs): The tile statistics collector — understand what data source it reads and how the 0x108-byte records are structured.
 - [ ] **sub_8f142c, sub_a6a3b0**: Callers of ApplyPreprocessingForFirefly — trace upstream Firefly orchestration.
 - [ ] **sub_86fe34**: WB + linearToNonLinear implementation (called with mode=2).
 - [ ] **sub_b05b0c** (333 BBs): Top-level stage pipeline — the other ComputeAutoGamma caller. Too large to decompile.
+- [ ] **sub_662264 internals**: CachedColorProfileFactory — understand sub_65b600 (matrix setup from illuminant+primaries) and sub_111abd4 (matrix computation).
+- [ ] **sub_bb6384** (56 BBs): Multi-curve LUT application path — the sRGB log encoding / luma-vs-nonluma dispatch.
+- [ ] **sub_bb7590** (48 BBs): Caller of BuildComposite3CurveEvaluator — understand full evaluator lifecycle.
+- [ ] **GammaCurve evaluate method**: Identify the actual pow() implementation stored at vtable+0x18 for GammaCurve objects.
