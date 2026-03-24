@@ -58,11 +58,14 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 | `0xb9cc68`  | CreateCurveFromToneCurveSpec      |   2 | —     | Creates curve object from tone curve specification data              |
 | `0xbb96dc`  | Construct_sRGBLogEncodeCurve      |   6 |   420 | cr_encode_sRGB_Log constructor, selects coeffs for split=0.51/0.6375 |
 | `0xbb9898`  | sRGBLogEncode_Evaluate            |   9 |   320 | 4-segment eval: linear/sRGB-gamma/ln/linear, maps [0,16]→[0,1]       |
-| `0xbb99d8`  | sRGBLogEncode_EvaluateInverse     |   9 |   292 | Inverse of sRGB log encode (exp-based decode)                        |
+| `0xbb99d8`  | sRGBLogEncode_EvaluateInverse     |   9 |   292 | 4-segment inverse: linear/sRGB EOTF/exp/linear, maps [0,1]→[0,16]    |
 | `0xbb7128`  | CreateRGBToneStage_Luma           |   1 |   164 | Direct (unconditional) luma tone stage creation                      |
 | `0xbb71fc`  | CreateRGBToneStage_IfCurveValid_A |   4 |   212 | Conditional: checks curve spec bit 5, then creates tone stage        |
 | `0xbb7300`  | CreateRGBToneStage_IfCurveValid_B |   4 |   224 | Conditional: same pattern as _A with different arg routing           |
 | `0xaf7f14`  | ToneCurvePipeline_Main            | 407 | 10836 | Main tone curve pipeline — calls all tone stage + evaluator funcs    |
+| `0xafb114`  | (ToneCurvePipelineTrigger)        |  65 |  2072 | Sole caller of ToneCurvePipeline_Main; uses hypot(), ~40 subroutines |
+| `0xbbbaac`  | HdrToneCurveTableHelper_Evaluate  |  16 |   616 | Sandwich eval: quadratic→sRGB-log-encode→inner_curve→sRGB-log-decode |
+| `0xbb2724`  | BuildHdrToneCurveTable            |   9 |   456 | 100-point curve builder: samples decode→transform→re-encode          |
 
 ## Vtables
 
@@ -79,6 +82,7 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 | `0x7cb1d50` | vtable_cr_hdr_tone_curve_table_helper | —           | HDR tone curve table helper (RTTI confirmed)       |
 | `0x7cb1b70` | vtable_cr_encode_sRGB_Log             | 0x40 bytes  | sRGB log encode curve: 5 vmethods (RTTI confirmed) |
 | `0x7cb19e0` | vtable_ToneCurveWrapper               | —           | Per-channel curve wrapper for evaluator build      |
+| `0x7c9fc80` | vtable_SplineCurve_SharedPtrCtrlBlk   | 32 bytes    | Control block for 100-point HDR spline curves      |
 | `0x7c9f928` | vtable_DefaultCurve_SharedPtrCtrlBlk  | 32 bytes    | shared_ptr ctrl block for default/identity curves  |
 
 ## Constants
@@ -534,6 +538,108 @@ This function is the **bridge between the auto-gamma pipeline and the color mana
 
 ---
 
+## sRGBLogEncode_EvaluateInverse (sub_bb99d8)
+
+**Signature**: `double sRGBLogEncode_EvaluateInverse(cr_encode_sRGB_Log* self, double y)`
+
+4-segment inverse of the sRGB log encode curve, mapping encoded [0,1] back to scene-linear [0,16].
+
+### Segment Boundaries (split = 0.51)
+
+| Encoded range               | Segment      | Formula                                     |     |                                       |
+| :-------------------------- | :----------- | :------------------------------------------ | --- | ------------------------------------- |
+| y < 0                       | Odd fallback | `-forward(                                  | y   | )` via vtable+0x18 (not true inverse) |
+| y ≤ split × 0.04045 ≈ 0.021 | sRGB linear  | `x = y / (split × 12.92)`                   |     |                                       |
+| 0.021 < y ≤ split = 0.51    | sRGB EOTF    | `x = pow((y/split + 0.055) / 1.055, 2.4)`   |     |                                       |
+| 0.51 < y < 1.0              | Exponential  | `x = exp((y - coeff_b) / coeff_a) - offset` |     |                                       |
+| y ≥ 1.0                     | Linear tail  | `x = (y - intercept) / slope`               |     |                                       |
+
+### Constants
+
+| Hex                   | Value   | Role                                   |
+| :-------------------- | :------ | :------------------------------------- |
+| `0x3FA4B5DAA07D970D`  | 0.04045 | sRGB encoded-domain linear/gamma split |
+| `0x3FB3D07221490B580` | 1/12.92 | Inverse of sRGB linear multiplier      |
+| `0x3FAC28F5C28F5C29`  |   0.055 | sRGB offset constant                   |
+| `0x3FEE54EDCD0AEB60`  | 1/1.055 | Inverse of sRGB scale constant         |
+| `0x4003333333333333`  |     2.4 | sRGB gamma exponent                    |
+
+### Negative Handling
+
+For y < 0, calls the **forward** evaluate (vtable+0x18) on |y| and negates, producing `-forward(|y|)` — NOT the true inverse `-inverse(|y|)`. Since the sRGB log curve maps [0,16]→[0,1], negative encoded values do not occur in normal usage; this is a safety fallback, not a mathematically rigorous inverse for the negative domain.
+
+---
+
+## HdrToneCurveTableHelper_Evaluate (sub_bbbaac)
+
+**Signature**: `double HdrToneCurveTableHelper_Evaluate(cr_hdr_tone_curve_table_helper* self, double input)`
+
+A "sandwich" evaluator that wraps an inner curve with sRGB log encode/decode, preceded by a quadratic domain expansion. The inner curve operates in the perceptually uniform encoded domain.
+
+### Pipeline
+
+1. **Clamp** input to [0, 1]
+2. **Quadratic expansion**: `scene_linear = 16.0 × input²` — maps [0,1] → [0,16], concentrating samples in shadows
+3. **sRGB log encode** (same 4-segment formula as `sRGBLogEncode_Evaluate`) → encoded ∈ [0, 1]
+4. **Inner curve** application via `self+0x48` → vtable+0x18 (evaluate), clamped ≥ 0
+5. **sRGB log decode** (same 4-segment formula as `sRGBLogEncode_EvaluateInverse`) → scene-linear ≥ 0
+
+### Object Layout
+
+```
+cr_hdr_tone_curve_table_helper (0x50 bytes):
++0x00: vtable (0x7cb1d50)
++0x08: [embedded cr_encode_sRGB_Log, 0x40 bytes]
+  +0x08: sRGB_Log.vtable (0x7cb1b70)
+  +0x10: sRGB_Log.coeff_a
+  +0x18: sRGB_Log.coeff_b
+  +0x20: sRGB_Log.offset
+  +0x28: sRGB_Log.split_point
+  +0x30: sRGB_Log.blend_point
+  +0x38: sRGB_Log.slope
+  +0x40: sRGB_Log.intercept
++0x48: ptr to inner curve object (vtable+0x18 = evaluate)
+```
+
+The HDR helper **embeds** a complete `cr_encode_sRGB_Log` object starting at +0x08. The same coefficients serve both the encode (Phase 3) and decode (Phase 5) paths. The inner curve pointer at +0x48 is the tone adjustment that operates in the encoded domain.
+
+### Quadratic Sampling Rationale
+
+The `16 × x²` expansion is a perceptually-motivated mapping: it allocates more of the [0,1] input range to shadow values (where the eye is most sensitive) and compresses highlights. Combined with the sRGB log encode/decode sandwich, this ensures the inner curve operates on perceptually uniform data with shadow-biased sampling.
+
+---
+
+## BuildHdrToneCurveTable (sub_bb2724)
+
+**Signature**: `void BuildHdrToneCurveTable(void* context)`
+
+Builds a 100-point spline curve by sampling the encode→inner_curve→decode pipeline.
+
+### Algorithm
+
+1. Constructs a `cr_encode_sRGB_Log` object on the stack (with split ≈ 0.51)
+2. Iterates i = 0..99 at step = 1/100:
+   - `x = i × 0.01` (encoded domain sample point)
+   - `scene = sRGBLogEncode_EvaluateInverse(x)` — decode to scene-linear
+   - Applies rational compression: `compressed = scene × (scene/256 + 1) / (scene + 1)` — soft [0,∞)→[0,1) map
+   - Evaluates inner curve: `adjusted = inner_curve.evaluate(compressed)` via vtable+0x18
+   - Applies quadratic expansion with sqrt-based inverse: `expanded = ((adjusted-1) + sqrt((adjusted-1)² + adjusted/64)) × 128`
+   - `y = sRGBLogEncode_Evaluate(expanded)` — re-encode
+   - Adds control point `(x, y)` to curve object
+3. Wraps the 100-point curve in a `shared_ptr` and stores it
+
+### Key Insight
+
+This is the offline curve-building path for the HDR tone curve table helper. The rational compression + quadratic expansion pair form domain transforms that concentrate precision where it matters most, while the sRGB log encode/decode sandwich ensures the inner curve sees perceptually uniform data.
+
+---
+
+## ToneCurvePipelineTrigger (sub_afb114)
+
+**65 BBs, 2072 bytes**. Sole caller of `ToneCurvePipeline_Main`. Calls ~40 subroutines including `hypot()` (likely for color distance calculations). Too large to decompile in full; role confirmed as the entry point that triggers the entire tone curve pipeline.
+
+---
+
 ## Implications
 
 ### From prior sessions (1-18)
@@ -601,6 +707,17 @@ This function is the **bridge between the auto-gamma pipeline and the color mana
 49. **ToneCurvePipeline_Main** (sub_af7f14) at 407 BBs / 10,836 bytes is the primary tone curve orchestrator. It calls all our named functions (InitializeRGBToneStage, ResolveAndBuildRGBToneEvaluator, ApplyEvaluatorToData, the three stage creators) plus ~150 other subroutines. Its sole caller is sub_afb114.
 50. **The sRGB log curve's negative handling** uses odd-function extension: `f(-x) = -f(x)`. This preserves sign symmetry for values that may go negative (e.g., unbounded scene-linear data from raw debayering), critical for maintaining color fidelity in the log domain.
 
+### New (51-58)
+
+51. **sRGBLogEncode_EvaluateInverse** is a 4-segment function that exactly inverts the forward encode: sRGB linear (`y/(split×12.92)`), sRGB EOTF (`pow((y/split+0.055)/1.055, 2.4)`), exponential (`exp((y-b)/a)-offset`), and linear tail (`(y-intercept)/slope`). Same IEC 61966-2-1 constants as the forward path, confirming mathematical consistency.
+52. **Negative handling asymmetry**: The inverse calls the FORWARD evaluate for negative inputs (`-forward(|y|)`) rather than recursing into itself (`-inverse(|y|)`). Since the sRGB log curve is defined for positive scene-linear values only, negative encoded values never occur in practice — this is a robustness fallback, not a true mathematical inverse for the negative domain.
+53. **HdrToneCurveTableHelper_Evaluate** is a "sandwich" evaluator: clamp [0,1] → quadratic expansion `16×x²` → sRGB log encode → inner curve → sRGB log decode → clamp ≥ 0. The inner curve operates in the perceptually uniform encoded domain while the quadratic expansion concentrates sampling in shadows.
+54. **The cr_hdr_tone_curve_table_helper object (0x50 bytes)** embeds a complete cr_encode_sRGB_Log (0x40 bytes) at +0x08, sharing its coefficients for both encode and decode phases. The inner curve pointer at +0x48 is the only additional field. This composition-via-embedding pattern is more efficient than separate encode/decode objects.
+55. **BuildHdrToneCurveTable** (sub_bb2724) samples 100 equally-spaced points in the encoded [0,1] domain, passing each through decode→rational_compress→inner_curve→quadratic_expand→re-encode to build a spline curve offline. The rational compression `x(x/256+1)/(x+1)` and quadratic expansion `((r-1)+sqrt((r-1)²+r/64))×128` form a complementary pair that biases precision toward shadow and midtone values.
+56. **ToneCurvePipelineTrigger** (sub_afb114, 65 BBs) is the sole caller of ToneCurvePipeline_Main. It calls `hypot()` (likely for color distance or gamut boundary calculations) plus ~40 other subroutines, acting as the full orchestration layer above the tone curve pipeline proper.
+57. **The sRGB log encode/decode pair** appears in three distinct roles: (1) standalone via `Get_sRGB_Log_EncodeTable`/`DecodeTable` as lazy singletons for GPU-accessible LUTs, (2) embedded in `cr_hdr_tone_curve_table_helper` as a sandwich evaluator, and (3) as the offline curve-building path in `BuildHdrToneCurveTable`. All three share the same 4-segment transfer function and coefficients.
+58. **GammaCurve evaluate** at vtable+0x18 computes `pow(x, gamma)` using the gamma value stored at object+0x08. The object layout `{vtable, gamma:f64, 1/gamma:f64}` stores both forward and inverse exponents for O(1) access without runtime division.
+
 ---
 
 ## Remaining Work
@@ -619,9 +736,13 @@ This function is the **bridge between the auto-gamma pipeline and the color mana
 - [ ] **sub_662264 internals**: CachedColorProfileFactory — understand sub_65b600 (matrix setup from illuminant+primaries) and sub_111abd4 (matrix computation).
 - [x] **sub_bb6384** (56 BBs): InitializeRGBToneStage — cr_stage_rgb_tone::Initialize, 4-path dispatch, sRGB log parametric curve, affine coefficients. Decompiled and documented.
 - [x] **sub_bb7590** (48 BBs): ResolveAndBuildRGBToneEvaluator — identity check, per-channel curve resolution, BuildComposite3CurveEvaluator call. Decompiled and documented.
-- [ ] **GammaCurve evaluate method**: Identify the actual pow() implementation stored at vtable+0x18 for GammaCurve objects.
+- [x] **GammaCurve evaluate method**: pow(x, gamma) using gamma at object+0x08. Vtable slot confirmed via call-site analysis.
 - [x] **sub_bb7128, sub_bb71fc, sub_bb7300**: Three thin wrappers — allocate/init/register tone stage. _A/_B check curve-spec bit 5 first.
 - [x] **sub_af7f14 (ToneCurvePipeline_Main)**: 407 BBs, sole caller of ResolveAndBuildRGBToneEvaluator. Too large to decompile; role confirmed via callees. Sole caller: sub_afb114.
 - [x] **sRGB log parametric curve coefficients**: Decoded. 4-segment curve: sRGB linear/gamma for [0,1], ln() for [1,16], linear for [16,∞]. Two split configs: 0.51 and 0.6375. Coeff pairs at 0x6cee140/0x6cee150.
 - [x] **vtable 0x7cb1b70 (cr_encode_sRGB_Log)**: 5 vmethods mapped: destructor, deleting destructor, shared base method, Evaluate (4-segment), EvaluateInverse. RTTI class name confirmed.
 - [x] **vtable 0x7cb1d50 (cr_hdr_tone_curve_table_helper)**: RTTI confirmed as separate class from cr_encode_sRGB_Log, sharing common base at 0x7ccabb0. 5 vmethods identified.
+- [x] **sub_bb99d8 (sRGBLogEncode_EvaluateInverse)**: 4-segment inverse fully decoded. sRGB linear/EOTF/exp/linear. Negative path calls forward (not true inverse) — safety fallback.
+- [x] **sub_bbbaac (HdrToneCurveTableHelper_Evaluate)**: Sandwich evaluator: clamp→quadratic 16x²→sRGB-log-encode→inner_curve→sRGB-log-decode. Object embeds 0x40-byte sRGB_Log at +0x08, inner curve ptr at +0x48.
+- [x] **sub_bb2724 (BuildHdrToneCurveTable)**: 100-point curve builder with rational compression + quadratic expansion domain transforms. Offline sampling path for HDR helper.
+- [x] **sub_afb114 (ToneCurvePipelineTrigger)**: 65 BBs, sole caller of ToneCurvePipeline_Main, uses hypot(). Role confirmed; too large to fully decompile.
