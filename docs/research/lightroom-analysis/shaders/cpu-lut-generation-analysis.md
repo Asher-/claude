@@ -8,6 +8,7 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 - [Named Functions](#named-functions)
 - [Vtables](#vtables)
 - [Constants](#constants)
+- [ApplyPreprocessingForFirefly (sub_8f4370)](#applypreprocessingforfirefly-sub_8f4370)
 - [ComputeAutoGamma (sub_afd9a0)](#computeautogamma-sub_afd9a0)
 - [GetOrCreateCachedGammaCurve (sub_662864)](#getorcreatecachedgammacurve-sub_662864)
 - [cr_tone_curve::ChannelToCurve (sub_b9e6c4)](#cr_tone_curvechanneltocurve-sub_b9e6c4)
@@ -32,8 +33,10 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 | `0xbb682c`  | WrapCurveAsLUTObject          | —   | —     | 64-byte cached LUT + 32-byte shared_ptr wrapper                      |
 | `0x686d38`  | CachedLUTBuilder              | —   | —     | Thread-safe with std::mutex, typed curve table entries               |
 | `0xb9effc`  | Get_sRGB_Log_DecodeTable      | —   | —     | Lazy singleton, GPU-accessible via Metal buffers                     |
+| `0x8f4370`  | ApplyPreprocessingForFirefly  |  26 |   968 | WB + linearToNonLinear + domain stretch + auto-gamma for Firefly AI  |
 | `0xafe02c`  | (TileStatisticsCollector)     |  65 |  1652 | Collects tile statistics records (0x108 bytes each) by tag           |
 | `0xafe7c0`  | (ScopedTimerEnd)              | —   | —     | Ends scoped timing section                                           |
+| `0xb05b0c`  | (TopLevelStagePipeline)       | 333 |  9360 | Top-level stage pipeline, also calls ComputeAutoGamma                |
 
 ## Vtables
 
@@ -59,6 +62,52 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 | `0xa4` (164)                           | Per-channel tone curve data stride               |
 | `0x3f70101010101010`                   | ~1/256, normalizes int32 control points to [0,1] |
 | `kCurveTableTypeSlopeExtendedFunction` | = 3, typed curve table entry kind                |
+
+---
+
+## ApplyPreprocessingForFirefly (sub_8f4370)
+
+**Signature** (reconstructed):
+```cpp
+void* ApplyPreprocessingForFirefly(
+    void* context,           // r0 → r20
+    void* stageObject,       // r1 → r23 — object with vtable, virtual call at +0x128
+    void* unused,            // r2
+    void* conditionalArg,    // r3 — if non-null, triggers sub_682aec
+    void* domainScaleOut,    // r4 → r25 — passed to ComputeAutoGamma as domainScaleArray
+    bool enableAutoGamma,    // r5 → r21 — if true, calls ComputeAutoGamma at the end
+    void* configStruct       // r6 — [+0x18] = channelCount, [+0x1c] = mode
+);
+```
+
+**Scoped timer**: `"ApplyPreprocessingForFirefly : WB + linearToNonLinear(fp32)"`
+
+### Pipeline Sequence
+
+1. **Create processing state**: `sub_79ea6c(context)` → returns new state object
+2. **White balance + linear-to-nonlinear** (`sub_86fe34`, mode=2): Core tone mapping conversion
+3. **Conditional processing** (`sub_682aec`, flags 1,0,0): Only if `conditionalArg != 0`
+4. **Virtual dispatch**: `stageObject->vtable[0x128/8]()` — queries some property
+5. **LUT application** (`sub_bb7410`): Called with `channelCount` and mode=1, only if a condition from step 4 passes and `sub_bc5874` bit 5 is clear
+6. **Special mode path** (`sub_683048`): Only when `mode == 0xb (11)`, with channelCount and flag=1
+7. **Statistics extraction** (`sub_9f4ba8`, `loc_9a5694`, `sub_870098`, `sub_9a97b4`, `loc_9f4e7c`): Computes per-channel bounds
+8. **Min/max channel sweep**: Loops channels 1..N finding global min and max from extracted bounds
+9. **Domain stretch table fill**: Same float[3] pattern as ComputeAutoGamma Phase 2:
+   - Forward: `[min, 0, -1/(min-max)]`
+   - Inverse: `[0, min, max-min]`
+10. **AutoStretching** (conditional): If domain tables have non-trivial range, runs `"ApplyPreprocessingForFirefly :AutoStretching"` via `sub_afd894` and swaps in the stretched state
+11. **ComputeAutoGamma** (optional): Only if `enableAutoGamma` flag is set
+
+### Callers
+
+| Caller       | Notes                         |
+| :----------- | :---------------------------- |
+| `sub_8f142c` | Upstream Firefly orchestrator |
+| `sub_a6a3b0` | Alternate entry point         |
+
+### Key Insight
+
+The Firefly AI preprocessing pipeline reuses the same LUT infrastructure (`sub_bb7410`) and auto-gamma system (`ComputeAutoGamma`) as the standard tone curve pipeline. This confirms these are shared CameraRaw primitives, not Firefly-specific code.
 
 ---
 
@@ -246,6 +295,9 @@ max ~19 control points per channel
 23. **GammaCurve objects** are 24 bytes `{vtable, gamma, 1/gamma}` — forward and inverse exponents stored together
 24. **Cached gamma factory** at `sub_662864` restricts gamma to [1.05, 10.0] and uses a separate thread-safe global cache (mutex at `0x7d58e60`, cache at `0x8001a98`)
 25. **cr_tone_curve::ChannelToCurve** uses 164-byte per-channel data with int32 control points scaled by ~1/256, max ~19 points per channel, from `reMedia.framework/CoreMedia`
+26. **Firefly AI preprocessing** reuses the same LUT infrastructure (`sub_bb7410`) and auto-gamma system as the standard tone curve pipeline — these are shared CameraRaw primitives
+27. **ApplyPreprocessingForFirefly** performs WB + linearToNonLinear (fp32), then domain stretch, then optional auto-gamma — the full preprocessing chain for generative AI input
+28. **Domain stretch is computed twice**: once inside ComputeAutoGamma from tile statistics, and once inside the Firefly preprocessor from per-channel bounds extraction — same float[3] table format
 
 ---
 
@@ -256,6 +308,9 @@ max ~19 control points per channel
 - [ ] **sub_bb458c, sub_bb4840**: The two resolution paths in Get1dFunctionIds.
 - [ ] **sub_686d38 cache internals**: sub_410538 (cache lookup) and sub_6870e0 (cache insert).
 - [ ] **Vtable method mapping**: evaluator base class (0x7ca1c88) and 3-curve evaluator (0x7c8bb18) virtual methods.
-- [ ] **sub_8f4370**: The 26-BB orchestrator that calls ComputeAutoGamma — trace its full pipeline.
+- [x] **sub_8f4370**: ApplyPreprocessingForFirefly — decompiled and documented.
 - [ ] **sub_a4b740**: Caller of GetOrCreateCachedGammaCurve — understand when the cached path is used vs the direct ComputeAutoGamma path.
 - [ ] **sub_afe02c** (65 BBs): The tile statistics collector — understand what data source it reads and how the 0x108-byte records are structured.
+- [ ] **sub_8f142c, sub_a6a3b0**: Callers of ApplyPreprocessingForFirefly — trace upstream Firefly orchestration.
+- [ ] **sub_86fe34**: WB + linearToNonLinear implementation (called with mode=2).
+- [ ] **sub_b05b0c** (333 BBs): Top-level stage pipeline — the other ComputeAutoGamma caller. Too large to decompile.
