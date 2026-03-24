@@ -16,6 +16,8 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 - [Object Layouts](#object-layouts)
 - [Virtual Dispatch Map](#virtual-dispatch-map)
 - [BuildColorProfileFromSpec (sub_a4b740)](#buildcolorprofilefromspec-sub_a4b740)
+- [InitializeRGBToneStage (sub_bb6384)](#initializergbtonestage-sub_bb6384--cr_stage_rgb_toneinitialize)
+- [ResolveAndBuildRGBToneEvaluator (sub_bb7590)](#resolveandbuildrgbtoneevaluator-sub_bb7590)
 - [Implications](#implications)
 - [Remaining Work](#remaining-work)
 
@@ -23,60 +25,73 @@ Binary: `CameraRaw.lrtoolkit` (ARM64, Mach-O).
 
 ## Named Functions
 
-| Address     | Name                          | BBs | Bytes | Description                                                          |
-| :---------- | :---------------------------- | --: | ----: | :------------------------------------------------------------------- |
-| `0xafd9a0`  | ComputeAutoGamma              |  42 |  1452 | Computes auto gamma from tile statistics, domain stretch, tone curve |
-| `0x662864`  | GetOrCreateCachedGammaCurve   |  25 |   524 | Thread-safe cached factory for GammaCurve objects                    |
-| `0xb9e6c4`  | cr_tone_curve::ChannelToCurve |   6 |   208 | Converts channel int32 control points to normalized tone curve       |
-| `0x677e3c`  | BuildComposite3CurveEvaluator | —   |   416 | Factory creating composite 3-curve evaluator objects                 |
-| `0x676ae8`  | Init3CurveEvaluator           | —   | —     | LUT resolution 256, two modes (direct vs indirect)                   |
-| `0x676d60`  | Configure3CurveEvaluator      | —   | —     | Stores 3 curves in mode-dependent slots                              |
-| `0x1115204` | EvaluateCurveToLUT            | —   | —     | Core LUT fill: direct loop (256 entries) or adaptive subdivision     |
-| `0x11150c8` | AdaptiveMidpointLUTFill       | —   | —     | Recursive midpoint refinement, epsilon = abs(diff) * (1/256)         |
-| `0xbb682c`  | WrapCurveAsLUTObject          | —   | —     | 64-byte cached LUT + 32-byte shared_ptr wrapper                      |
-| `0x686d38`  | CachedLUTBuilder              | —   | —     | Thread-safe with std::mutex, typed curve table entries               |
-| `0xb9effc`  | Get_sRGB_Log_DecodeTable      | —   | —     | Lazy singleton, GPU-accessible via Metal buffers                     |
-| `0x8f4370`  | ApplyPreprocessingForFirefly  |  26 |   968 | WB + linearToNonLinear + domain stretch + auto-gamma for Firefly AI  |
-| `0xafe02c`  | (TileStatisticsCollector)     |  65 |  1652 | Collects tile statistics records (0x108 bytes each) by tag           |
-| `0xafe7c0`  | (ScopedTimerEnd)              | —   | —     | Ends scoped timing section                                           |
-| `0xb05b0c`  | (TopLevelStagePipeline)       | 333 |  9360 | Top-level stage pipeline, also calls ComputeAutoGamma                |
-| `0x9bc088`  | InitEvaluatorBase             |   1 |    48 | Base class constructor: sets vtable, LUT resolution=256, defaults    |
-| `0x6971f8`  | Destroy3CurveEvaluator        |  12 |   236 | Destructor: releases curve objects, vectors, base class cleanup      |
-| `0xa4b740`  | BuildColorProfileFromSpec     |  25 |   524 | Color profile factory: illuminant + primaries + gamma → profile      |
-| `0x662264`  | CachedColorProfileFactory     |  11 |   676 | Thread-safe cached factory for color profile objects (0x130 bytes)   |
-| `0x66d97c`  | ApplyEvaluatorToData          |   4 |   200 | Alternate evaluation path (arg4 < 2): single-curve LUT application   |
-| `0x6625f4`  | BuildGammaOnlyProfile         | —   | —     | Builds a gamma-only color profile (when illuminant type == 1)        |
-| `0xbb7410`  | (LUTApplicationDispatch)      |   7 |   280 | Dispatches LUT application: arg4≥2 → multi-curve, else → single      |
-| `0x66b6d4`  | (SingleCurveEvaluatorInit)    |   6 |   212 | Creates 0x70-byte single-curve evaluator with LUT + shared_ptr       |
-| `0x9bd3ac`  | (NormalizeCurveType)          |   1 |    44 | Maps curve types: 3→3, >2→2, else XOR with 1                         |
+| Address     | Name                            | BBs | Bytes | Description                                                          |
+| :---------- | :------------------------------ | --: | ----: | :------------------------------------------------------------------- |
+| `0xafd9a0`  | ComputeAutoGamma                |  42 |  1452 | Computes auto gamma from tile statistics, domain stretch, tone curve |
+| `0x662864`  | GetOrCreateCachedGammaCurve     |  25 |   524 | Thread-safe cached factory for GammaCurve objects                    |
+| `0xb9e6c4`  | cr_tone_curve::ChannelToCurve   |   6 |   208 | Converts channel int32 control points to normalized tone curve       |
+| `0x677e3c`  | BuildComposite3CurveEvaluator   | —   |   416 | Factory creating composite 3-curve evaluator objects                 |
+| `0x676ae8`  | Init3CurveEvaluator             | —   | —     | LUT resolution 256, two modes (direct vs indirect)                   |
+| `0x676d60`  | Configure3CurveEvaluator        | —   | —     | Stores 3 curves in mode-dependent slots                              |
+| `0x1115204` | EvaluateCurveToLUT              | —   | —     | Core LUT fill: direct loop (256 entries) or adaptive subdivision     |
+| `0x11150c8` | AdaptiveMidpointLUTFill         | —   | —     | Recursive midpoint refinement, epsilon = abs(diff) * (1/256)         |
+| `0xbb682c`  | WrapCurveAsLUTObject            | —   | —     | 64-byte cached LUT + 32-byte shared_ptr wrapper                      |
+| `0x686d38`  | CachedLUTBuilder                | —   | —     | Thread-safe with std::mutex, typed curve table entries               |
+| `0xb9effc`  | Get_sRGB_Log_DecodeTable        | —   | —     | Lazy singleton, GPU-accessible via Metal buffers                     |
+| `0x8f4370`  | ApplyPreprocessingForFirefly    |  26 |   968 | WB + linearToNonLinear + domain stretch + auto-gamma for Firefly AI  |
+| `0xafe02c`  | (TileStatisticsCollector)       |  65 |  1652 | Collects tile statistics records (0x108 bytes each) by tag           |
+| `0xafe7c0`  | (ScopedTimerEnd)                | —   | —     | Ends scoped timing section                                           |
+| `0xb05b0c`  | (TopLevelStagePipeline)         | 333 |  9360 | Top-level stage pipeline, also calls ComputeAutoGamma                |
+| `0x9bc088`  | InitEvaluatorBase               |   1 |    48 | Base class constructor: sets vtable, LUT resolution=256, defaults    |
+| `0x6971f8`  | Destroy3CurveEvaluator          |  12 |   236 | Destructor: releases curve objects, vectors, base class cleanup      |
+| `0xa4b740`  | BuildColorProfileFromSpec       |  25 |   524 | Color profile factory: illuminant + primaries + gamma → profile      |
+| `0x662264`  | CachedColorProfileFactory       |  11 |   676 | Thread-safe cached factory for color profile objects (0x130 bytes)   |
+| `0x66d97c`  | ApplyEvaluatorToData            |   4 |   200 | Alternate evaluation path (arg4 < 2): single-curve LUT application   |
+| `0x6625f4`  | BuildGammaOnlyProfile           | —   | —     | Builds a gamma-only color profile (when illuminant type == 1)        |
+| `0xbb7410`  | (LUTApplicationDispatch)        |   7 |   280 | Dispatches LUT application: arg4≥2 → multi-curve, else → single      |
+| `0x66b6d4`  | (SingleCurveEvaluatorInit)      |   6 |   212 | Creates 0x70-byte single-curve evaluator with LUT + shared_ptr       |
+| `0x9bd3ac`  | (NormalizeCurveType)            |   1 |    44 | Maps curve types: 3→3, >2→2, else XOR with 1                         |
+| `0xbb6384`  | InitializeRGBToneStage          |  56 |  1648 | cr_stage_rgb_tone::Initialize: {luma,non-luma}×{sRGB-log,linear}     |
+| `0xbb7590`  | ResolveAndBuildRGBToneEvaluator |  48 |  1116 | Resolves 3 per-channel curves, skips if identity, builds evaluator   |
+| `0xb9ef6c`  | Get_sRGB_Log_EncodeTable        |   3 |   144 | Lazy singleton at 0x801c4b8, from cr_tone_curve.cpp line 0x480       |
+| `0xb9c4a4`  | IsToneCurveIdentity             |   5 | —     | Checks if per-channel tone curve has default/identity values         |
+| `0xb9cc68`  | CreateCurveFromToneCurveSpec    |   2 | —     | Creates curve object from tone curve specification data              |
 
 ## Vtables
 
-| Address     | Name                                 | Object Size | Layout                                         |
-| :---------- | :----------------------------------- | :---------- | :--------------------------------------------- |
-| `0x7c8ab10` | vtable_GammaCurve                    | 24 bytes    | `{vtable, gamma:f64, 1/gamma:f64}`             |
-| `0x7c8ac00` | vtable_GammaCurve_SharedPtrCtrlBlock | 32 bytes    | `{vtable, refcount, weakcount, raw_ptr}`       |
-| `0x7c8bb18` | vtable_3CurveEvaluator               | —           | LUT resolution 256                             |
-| `0x7cb1990` | vtable_CachedLUTWrapper              | 64+32 bytes | Cached LUT representation + shared_ptr wrapper |
-| `0x7ca1c88` | vtable_EvaluatorBaseClass            | ≥0x24 bytes | Base class for curve evaluators                |
-| `0x7c8aac8` | vtable_ColorProfile                  | 0x130 bytes | Color profile: illuminant + primaries + gamma  |
-| `0x7c8abb0` | vtable_ColorProfile_SharedPtrCtrlBlk | 32 bytes    | `{vtable, refcount, weakcount, raw_ptr}`       |
-| `0x7c8d2e0` | vtable_SingleCurveWrapper            | —           | Used in single-curve evaluator init            |
+| Address     | Name                                  | Object Size | Layout                                            |
+| :---------- | :------------------------------------ | :---------- | :------------------------------------------------ |
+| `0x7c8ab10` | vtable_GammaCurve                     | 24 bytes    | `{vtable, gamma:f64, 1/gamma:f64}`                |
+| `0x7c8ac00` | vtable_GammaCurve_SharedPtrCtrlBlock  | 32 bytes    | `{vtable, refcount, weakcount, raw_ptr}`          |
+| `0x7c8bb18` | vtable_3CurveEvaluator                | —           | LUT resolution 256                                |
+| `0x7cb1990` | vtable_CachedLUTWrapper               | 64+32 bytes | Cached LUT representation + shared_ptr wrapper    |
+| `0x7ca1c88` | vtable_EvaluatorBaseClass             | ≥0x24 bytes | Base class for curve evaluators                   |
+| `0x7c8aac8` | vtable_ColorProfile                   | 0x130 bytes | Color profile: illuminant + primaries + gamma     |
+| `0x7c8abb0` | vtable_ColorProfile_SharedPtrCtrlBlk  | 32 bytes    | `{vtable, refcount, weakcount, raw_ptr}`          |
+| `0x7c8d2e0` | vtable_SingleCurveWrapper             | —           | Used in single-curve evaluator init               |
+| `0x7cb1d50` | vtable_sRGBLogParametricCurve         | —           | Parametric sRGB log curve wrapper                 |
+| `0x7cb1b70` | vtable_sRGBLogParametricCurve_CtrlBlk | 32 bytes    | Secondary vtable in sRGB log curve object         |
+| `0x7cb19e0` | vtable_ToneCurveWrapper               | —           | Per-channel curve wrapper for evaluator build     |
+| `0x7c9f928` | vtable_DefaultCurve_SharedPtrCtrlBlk  | 32 bytes    | shared_ptr ctrl block for default/identity curves |
 
 ## Constants
 
-| Value                                  | Meaning                                          |
-| :------------------------------------- | :----------------------------------------------- |
-| `0x3e45798ee0000000`                   | epsilon ~ 7.45e-9, prevents log(0)               |
-| `0xbfe62e42fefa39ef`                   | -ln(2) ~ -0.6931, divisor for log2 conversion    |
-| `0xbfd999999999999b`                   | -0.4, threshold for secondary gamma correction   |
-| `0x3ff0c28f5c28f5c3`                   | 1.05, minimum gamma for cached factory           |
-| `0x4024000000000000`                   | 10.0, maximum gamma for cached factory           |
-| `0x322bcc77`                           | Hash tag for "AutoGamma" statistics query        |
-| `0x108` (264)                          | Tile statistics record stride                    |
-| `0xa4` (164)                           | Per-channel tone curve data stride               |
-| `0x3f70101010101010`                   | ~1/256, normalizes int32 control points to [0,1] |
-| `kCurveTableTypeSlopeExtendedFunction` | = 3, typed curve table entry kind                |
+| Value                                  | Meaning                                           |
+| :------------------------------------- | :------------------------------------------------ |
+| `0x3e45798ee0000000`                   | epsilon ~ 7.45e-9, prevents log(0)                |
+| `0xbfe62e42fefa39ef`                   | -ln(2) ~ -0.6931, divisor for log2 conversion     |
+| `0xbfd999999999999b`                   | -0.4, threshold for secondary gamma correction    |
+| `0x3ff0c28f5c28f5c3`                   | 1.05, minimum gamma for cached factory            |
+| `0x4024000000000000`                   | 10.0, maximum gamma for cached factory            |
+| `0x322bcc77`                           | Hash tag for "AutoGamma" statistics query         |
+| `0x108` (264)                          | Tile statistics record stride                     |
+| `0xa4` (164)                           | Per-channel tone curve data stride                |
+| `0x3f70101010101010`                   | ~1/256, normalizes int32 control points to [0,1]  |
+| `kCurveTableTypeSlopeExtendedFunction` | = 3, typed curve table entry kind                 |
+| `0x3FEAF3387160956C`                   | ~0.8425, sRGB log parametric curve coefficient    |
+| `0x3FEFE00000000000`                   | 255/256 = 0.99609375, curve near-endpoint eval    |
+| `0x801c4b8`                            | Global singleton: sRGB log encode table           |
+| `0x6cee140–0x6cee17F`                  | Static coefficients for sRGB log parametric curve |
 
 ---
 
@@ -272,9 +287,106 @@ max ~19 control points per channel
 5. **CachedLUTBuilder** (`0x686d38`): Thread-safe builder with `std::mutex`, typed curve table entries (`kCurveTableTypeSlopeExtendedFunction = 3`)
 6. **sRGB Log Tables**: `Get_sRGB_Log_DecodeTable` (`0xb9effc`) — lazy singleton, GPU-accessible via Metal buffers
 
-### Key Analysis from sub_bb6384
+### InitializeRGBToneStage (sub_bb6384) — cr_stage_rgb_tone::Initialize
 
-56 basic blocks. Non-luma/luma modes with sRGB log encoding paths. Error string: `'cr_stage_rgb_tone::Initialize in Luma mode requires negative'`.
+**Signature** (reconstructed):
+```cpp
+void InitializeRGBToneStage(
+    void* self,              // x0 → x19 — cr_stage_rgb_tone object
+    void* curveData,         // x1 → x20 — curve input data
+    void* curve,             // x2 → x21 — curve evaluator (vtable+0x18 = evaluate)
+    void* negativeCurve,     // x3 → x24 — required for luma mode, NULL otherwise
+    int   arg4,              // x4 → x23 — passed to EvaluateCurveToLUT
+    int   curveType,         // x5 — if ==1, normalize via NormalizeCurveType
+    int   hasLinearization   // x6 → x22 — linearization flag
+);
+```
+
+**Error string**: `"cr_stage_rgb_tone::Initialize in Luma mode requires negative"`
+
+**Four dispatch paths** based on `self+0xFA` (luma mode flag) and `self+0xF0` (sRGB log encoding flag):
+
+| Luma mode | sRGB log | Path                                                                        |
+| :-------- | :------- | :-------------------------------------------------------------------------- |
+| No        | No       | Tail call: `EvaluateCurveToLUT(self+0x28, transformedCurve, curve, arg4)`   |
+| No        | Yes      | Builds parametric sRGB log curve, LUT, decode table, affine coefficients    |
+| Yes       | No       | 2× `CachedLUTBuilder` → self+0xA0, self+0xB0                                |
+| Yes       | Yes      | `WrapCurveAsLUTObject` → self+0xC0 + `Get_sRGB_Log_EncodeTable` → self+0x98 |
+
+**Non-luma sRGB log path** (the most complex):
+1. Constructs a **parametric sRGB log curve** on the stack (vtable `0x7cb1d50`) wrapping the original curve with coefficients from static data at `0x6cee140–0x6cee17F`
+2. Calls `EvaluateCurveToLUT` to bake the wrapped curve into a LUT object
+3. Calls `Get_sRGB_Log_DecodeTable` to get the inverse mapping table
+4. Evaluates the original curve at 3 points via vtable+0x18: `curve(1.0)`, `curve(255/256)`, `curve(1.0)` — computing the slope at the top of the range
+5. Derives 4 affine coefficients (scale_x, offset_x, scale_y, offset_y) for sRGB log ↔ linear space mapping
+6. Computes a **luma bias** from `LUT[0]`: if `LUT[0] > 0` then bias = `2×LUT[0]`, else bias = 0
+
+**cr_stage_rgb_tone object layout** (partial):
+```
++0x28:  Embedded LUT evaluator (non-luma simple path, filled by EvaluateCurveToLUT)
++0x48:  sRGB log evaluator block (non-luma sRGB path):
+  +0x48+0x00: ptr to LUT object
+  +0x48+0x08: ptr to sRGB decode table
+  +0x48+0x10: float scale_x
+  +0x48+0x14: float offset_x
+  +0x48+0x18: float scale_y
+  +0x48+0x1C: float offset_y
+  +0x48+0x20: LUT data pointer
+  +0x48+0x28: int   LUT element count
+  +0x48+0x2C: float LUT element count (as float)
+  +0x48+0x30: sRGB decode data pointer
+  +0x48+0x38: int   sRGB decode element count
+  +0x48+0x3C: float sRGB decode element count (as float)
+  +0x48+0x40: float luma_bias
++0x98:  ptr   sRGB log encode table (luma sRGB path)
++0xA0:  shared_ptr to cached LUT (channel R, luma non-sRGB path)
++0xB0:  shared_ptr to cached LUT (channel G, luma non-sRGB path)
++0xC0:  shared_ptr to wrapped LUT (channel B/luma)
++0xD0:  uint32 curveType (stored from arg5)
++0xF0:  byte   sRGB log encoding flag
++0xFA:  byte   luma mode flag
+```
+
+**Callers**: `sub_bb7128`, `sub_bb71fc`, `sub_bb7300`, `LUTApplicationDispatch` (0xbb7410)
+
+---
+
+### ResolveAndBuildRGBToneEvaluator (sub_bb7590)
+
+**Signature** (reconstructed):
+```cpp
+void ResolveAndBuildRGBToneEvaluator(
+    void* evaluatorOut,    // x0 → x21 — destination for composite evaluator
+    void* configData,      // x1 → x20 — configuration data
+    void* toneSettings,    // x2 → x27 — source settings object with curves
+    int   mode             // x3 → x19 — mode value
+);
+```
+
+**Single caller**: `sub_af7f14`
+
+**Logic**:
+
+1. **Identity check** — extracts 3 per-channel tone curves at strides +0xA4, +0x148, +0x1EC from the settings object and checks each via `IsToneCurveIdentity`:
+   - If all 3 channels are identity (default/unmodified): **early return** — no evaluator built
+   - If any channel is modified: proceed to build evaluator
+
+2. **Curve resolution** — for each of the 3 channels:
+   - Reads pre-existing curve `shared_ptr` from a `std::vector` at `toneSettings[0x310..0x318]` (3 entries × 16 bytes = 0x30 bytes)
+   - If the curve pointer is NULL, creates a default via `CreateCurveFromToneCurveSpec(base + offset)`, wrapped in a `shared_ptr` (ctrl block vtable `0x7c9f928`)
+
+3. **Evaluator construction** — wraps each curve in a `vtable_ToneCurveWrapper` (0x7cb19e0) structure and calls:
+   ```
+   BuildComposite3CurveEvaluator(evaluatorOut, configData, &wrappedR, &wrappedG, &wrappedB, mode, configValue, flags...)
+   ```
+
+4. **Cleanup** — releases all 3 curve shared_ptrs
+
+**Key helpers**:
+- `sub_94da60(obj, 2)`: Data accessor, returns base pointer for curve channel data
+- `sub_950b7c(obj)`: Extracts a configuration value from the settings object
+- `sub_b9c4a4(ptr)`: `IsToneCurveIdentity` — returns 1 if curve at ptr has type==2 and all control points at default positions
+- `sub_b9cc68(ptr)`: `CreateCurveFromToneCurveSpec` — dispatches to two sub-creators based on a flag
 
 ---
 
@@ -458,6 +570,15 @@ This function is the **bridge between the auto-gamma pipeline and the color mana
 35. **LUT application dispatches** in sub_bb7410 based on arg4: ≥2 goes to multi-curve path (sub_bb6384, 56 BBs), <2 goes to single-curve path (sub_66d97c → sub_66b6d4).
 36. **The -0.4 gamma threshold** appears in both ComputeAutoGamma (secondary gamma decision) and BuildColorProfileFromSpec (gamma range check), reinforcing this as a system-wide under-exposure boundary.
 
+### New (37-42)
+
+37. **InitializeRGBToneStage** dispatches across 4 paths: {luma, non-luma} × {sRGB log encoding, direct LUT}. The sRGB log path wraps curves in a parametric sRGB log transformer and computes affine scale/offset coefficients; the direct path simply tail-calls EvaluateCurveToLUT.
+38. **The non-luma sRGB log path** builds a composite parametric curve (vtable `0x7cb1d50`) that wraps the original tone curve with sRGB log encoding coefficients loaded from static data at `0x6cee140–0x6cee17F`. This curve is evaluated to a LUT, then paired with the sRGB log decode table for runtime inverse mapping — the forward/inverse pair enables working in perceptually uniform sRGB log space.
+39. **The sRGB log evaluator block** at `self+0x48` stores: LUT object, sRGB decode table, 4 float affine coefficients (scale_x, offset_x, scale_y, offset_y), data pointers, element counts, and a luma bias computed as `2×LUT[0]` when `LUT[0] > 0`. The affine coefficients are derived from evaluating the original curve at 1.0 and 255/256 to compute the tangent slope at the top of the range.
+40. **ResolveAndBuildRGBToneEvaluator** checks all 3 per-channel tone curves for identity (via `IsToneCurveIdentity`) and early-returns if none are modified — an optimization that skips evaluator construction entirely when no tone adjustments are active.
+41. **Per-channel curves** are extracted from a `std::vector` of 3 `shared_ptr`s (size 0x30 = 48 bytes) at source offset `0x310`. If a channel's curve is NULL, a default is created from the tone curve specification via `CreateCurveFromToneCurveSpec`, wrapped in a `shared_ptr` with vtable `0x7c9f928`.
+42. **The sRGB log encode/decode tables** are separate lazy singletons: encode at global `0x801c4b8` (`Get_sRGB_Log_EncodeTable`, source: `cr_tone_curve.cpp:0x480`), decode at `Get_sRGB_Log_DecodeTable`. Both require an "accelerator" to be initialized first (error: "called without accelerator"), confirming tight GPU/CPU integration for the sRGB log domain.
+
 ---
 
 ## Remaining Work
@@ -474,6 +595,10 @@ This function is the **bridge between the auto-gamma pipeline and the color mana
 - [ ] **sub_86fe34**: WB + linearToNonLinear implementation (called with mode=2).
 - [ ] **sub_b05b0c** (333 BBs): Top-level stage pipeline — the other ComputeAutoGamma caller. Too large to decompile.
 - [ ] **sub_662264 internals**: CachedColorProfileFactory — understand sub_65b600 (matrix setup from illuminant+primaries) and sub_111abd4 (matrix computation).
-- [ ] **sub_bb6384** (56 BBs): Multi-curve LUT application path — the sRGB log encoding / luma-vs-nonluma dispatch.
-- [ ] **sub_bb7590** (48 BBs): Caller of BuildComposite3CurveEvaluator — understand full evaluator lifecycle.
+- [x] **sub_bb6384** (56 BBs): InitializeRGBToneStage — cr_stage_rgb_tone::Initialize, 4-path dispatch, sRGB log parametric curve, affine coefficients. Decompiled and documented.
+- [x] **sub_bb7590** (48 BBs): ResolveAndBuildRGBToneEvaluator — identity check, per-channel curve resolution, BuildComposite3CurveEvaluator call. Decompiled and documented.
 - [ ] **GammaCurve evaluate method**: Identify the actual pow() implementation stored at vtable+0x18 for GammaCurve objects.
+- [ ] **sub_bb7128, sub_bb71fc, sub_bb7300**: Three other callers of InitializeRGBToneStage — understand the different entry contexts.
+- [ ] **sub_af7f14**: Sole caller of ResolveAndBuildRGBToneEvaluator — upstream tone curve setup.
+- [ ] **sRGB log parametric curve coefficients**: Decode the static data at 0x6cee140–0x6cee17F to understand the exact sRGB log encoding formula.
+- [ ] **vtable 0x7cb1d50 methods**: Map the sRGB log parametric curve's virtual methods, especially evaluate(double→double) at +0x18.
