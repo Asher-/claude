@@ -7,9 +7,6 @@
 [submodule "photography"]
 	path = photography
 	url = git@github.com:StrongAI/claude-photography.git
-[submodule "mcp/statement"]
-	path = mcp/statement
-	url = git@github.com:StrongAI/claude-statement-mcp.git
 [submodule "skills"]
 	path = skills
 	url = git@github.com:StrongAI/claude-skills.git
