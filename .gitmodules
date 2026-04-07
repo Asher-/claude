@@ -4,9 +4,6 @@
 [submodule "claude-law"]
 	path = claude-law
 	url = git@github.com:StrongAI/claude-law.git
-[submodule "lacan"]
-	path = lacan
-	url = git@github.com:StrongAI/claude-lacan.git
 [submodule "hopper-mcp"]
 	path = hopper-mcp
 	url = git@github.com:StrongAI/claude-hopper-mcp.git
