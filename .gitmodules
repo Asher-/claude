@@ -10,12 +10,6 @@
 [submodule "mcp/statement"]
 	path = mcp/statement
 	url = git@github.com:StrongAI/claude-statement-mcp.git
-[submodule "db/core"]
-	path = db/core
-	url = git@github.com:StrongAI/claude-db-core.git
-[submodule "db/statements"]
-	path = db/statements
-	url = git@github.com:StrongAI/claude-db-statements.git
 [submodule "skills"]
 	path = skills
 	url = git@github.com:StrongAI/claude-skills.git
