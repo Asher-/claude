@@ -16,9 +16,6 @@
 [submodule "serena"]
 	path = serena
 	url = git@github.com:Asher-/serena.git
-[submodule "psyche"]
-	path = psyche
-	url = git@github.com:StrongAI/claude-psyche.git
 [submodule "brain"]
 	path = brain
 	url = git@github.com:StrongAI/claude-brain.git
