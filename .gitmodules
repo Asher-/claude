@@ -43,9 +43,6 @@
 [submodule "brain"]
 	path = brain
 	url = git@github.com:StrongAI/claude-brain.git
-[submodule "deleuze_guattari"]
-	path = deleuze_guattari
-	url = git@github.com:StrongAI/claude-deleuze_guattari.git
 [submodule "ocr"]
 	path = ocr
 	url = git@github.com:Asher-/macos-vision-ocr.git
