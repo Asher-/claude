@@ -19,9 +19,6 @@
 [submodule "serena"]
 	path = serena
 	url = git@github.com:Asher-/serena.git
-[submodule "mcp/context"]
-	path = mcp/context
-	url = git@github.com:StrongAI/claude-mcp-context.git
 [submodule "psyche"]
 	path = psyche
 	url = git@github.com:StrongAI/claude-psyche.git
