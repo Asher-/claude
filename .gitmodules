@@ -7,9 +7,6 @@
 [submodule "lacan"]
 	path = lacan
 	url = git@github.com:StrongAI/claude-lacan.git
-[submodule "macos/claude-code"]
-	path = macos/claude-code
-	url = git@github.com:StrongAI/claude-code.git
 [submodule "hopper-mcp"]
 	path = hopper-mcp
 	url = git@github.com:StrongAI/claude-hopper-mcp.git
