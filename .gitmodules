@@ -1,6 +1,3 @@
-[submodule "claude-law"]
-	path = claude-law
-	url = git@github.com:StrongAI/claude-law.git
 [submodule "speakers"]
 	path = speakers
 	url = git@github.com:Asher-/speakers.git
