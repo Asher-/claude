@@ -46,9 +46,6 @@
 [submodule "ocr"]
 	path = ocr
 	url = git@github.com:Asher-/macos-vision-ocr.git
-[submodule "mtg"]
-	path = mtg
-	url = git@github.com:StrongAI/mtg.git
 [submodule "macos/MarkEdit"]
 	path = macos/MarkEdit
 	url = git@github.com:Asher-/MarkEdit.git
