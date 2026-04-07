@@ -61,3 +61,6 @@
 [submodule "macos/MarkEdit"]
 	path = macos/MarkEdit
 	url = git@github.com:Asher-/MarkEdit.git
+[submodule "macos/MarkEdit-preview"]
+	path = macos/MarkEdit-preview
+	url = git@github.com:MarkEdit-app/MarkEdit-preview.git
