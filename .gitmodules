@@ -10,9 +10,6 @@
 [submodule "strongai"]
 	path = strongai
 	url = git@github.com:StrongAI/claude-strongai.git
-[submodule "scripts"]
-	path = scripts
-	url = git@github.com:StrongAI/claude-scripts.git
 [submodule "serena"]
 	path = serena
 	url = git@github.com:Asher-/serena.git
