@@ -5,6 +5,10 @@
 # Merges Claude Desktop session indexes from multiple accounts into one,
 # then symlinks so all accounts share the same session list.
 #
+# Account discovery uses two sources (either can be stale/missing):
+#   1. ~/.claude/accounts.json — written by Claude Desktop, may lag after remove/re-add
+#   2. Disk scan of session directories — finds all lowercase-UUID account/org pairs
+#
 # Structure before:
 #   claude-code-sessions/{acct1}/{org1}/  (28 sessions)
 #   claude-code-sessions/{acct2}/{org2}/  (4 sessions)
@@ -47,36 +51,61 @@ acquire_lock() {
 }
 
 # --- Discover account/org pairs ---
-# Uses ~/.claude/accounts.json as the authoritative source of accounts.
-# Only returns pairs that actually exist (as dir or symlink) in the sessions dir.
+# Two-source discovery: reads accounts.json AND scans session directories on disk.
+# accounts.json may be stale (e.g. after account remove/re-add), so disk scanning
+# ensures we never miss accounts that actually exist.
+# Only returns lowercase-UUID pairs (skips uppercase Desktop agent-mode UUIDs).
 discover_accounts() {
     if [[ ! -d "$SESSIONS_DIR" ]]; then
         return
     fi
-    if [[ ! -f "$ACCOUNTS_JSON" ]]; then
-        echo "WARNING: $ACCOUNTS_JSON not found, cannot discover accounts" >&2
-        return
-    fi
 
-    # Parse account/org pairs from accounts.json
-    local pairs
-    pairs=$(python3 -c "
+    # Collect all pairs, then deduplicate at the end.
+    # Two sources: accounts.json (may be stale) and disk scan.
+    local all_discovered=""
+
+    # Source 1: accounts.json (may be stale, but still useful)
+    if [[ -f "$ACCOUNTS_JSON" ]]; then
+        local pairs
+        pairs=$(python3 -c "
 import json, sys
 with open('$ACCOUNTS_JSON') as f:
     for a in json.load(f):
         print(a['accountUuid'] + '/' + a['organizationUuid'])
-" 2>/dev/null) || return
+" 2>/dev/null) || true
 
-    while IFS= read -r pair; do
-        [[ -z "$pair" ]] && continue
-        local acct_uuid="${pair%%/*}"
-        local org_uuid="${pair##*/}"
-        local org_path="$SESSIONS_DIR/$acct_uuid/$org_uuid"
-        # Include if the org path exists as a real dir, a valid symlink, or a broken symlink
-        if [[ -d "$org_path" || -L "$org_path" ]]; then
-            echo "$pair"
-        fi
-    done <<< "$pairs"
+        while IFS= read -r pair; do
+            [[ -z "$pair" ]] && continue
+            local acct_uuid="${pair%%/*}"
+            local org_uuid="${pair##*/}"
+            local org_path="$SESSIONS_DIR/$acct_uuid/$org_uuid"
+            if [[ -d "$org_path" || -L "$org_path" ]]; then
+                all_discovered="${all_discovered}${pair}"$'\n'
+            fi
+        done <<< "$pairs"
+    fi
+
+    # Source 2: scan session directories on disk for any pairs not in accounts.json.
+    # Only match lowercase UUID patterns (8-4-4-4-12) to skip Desktop agent UUIDs.
+    local uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    for acct_dir in "$SESSIONS_DIR"/*/; do
+        [[ -d "$acct_dir" ]] || continue
+        local acct_uuid
+        acct_uuid=$(basename "$acct_dir")
+        [[ "$acct_uuid" =~ $uuid_re ]] || continue
+
+        for org_dir in "$acct_dir"*/; do
+            [[ -d "$org_dir" || -L "$org_dir" ]] || continue
+            local org_uuid
+            org_uuid=$(basename "$org_dir")
+            [[ "$org_uuid" =~ $uuid_re ]] || continue
+
+            all_discovered="${all_discovered}${acct_uuid}/${org_uuid}"$'\n'
+        done
+    done
+
+    # Deduplicate and output
+    echo "$all_discovered" | sort -u | grep -v '^$'
 }
 
 count_sessions() {
@@ -255,8 +284,99 @@ check_integrity() {
     return 0
 }
 
+# --- Reconcile accounts.json with disk state ---
+# When accounts are removed/re-added, accounts.json may not be updated.
+# This function ensures accounts.json reflects what's actually on disk.
+update_accounts_json() {
+    [[ -d "$SESSIONS_DIR" ]] || return
+
+    # Get all lowercase-UUID pairs from disk
+    local uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    local disk_pairs=""
+    for acct_dir in "$SESSIONS_DIR"/*/; do
+        [[ -d "$acct_dir" ]] || continue
+        local acct_uuid
+        acct_uuid=$(basename "$acct_dir")
+        [[ "$acct_uuid" =~ $uuid_re ]] || continue
+        for org_dir in "$acct_dir"*/; do
+            [[ -d "$org_dir" || -L "$org_dir" ]] || continue
+            local org_uuid
+            org_uuid=$(basename "$org_dir")
+            [[ "$org_uuid" =~ $uuid_re ]] || continue
+            disk_pairs="${disk_pairs}${acct_uuid}/${org_uuid}"$'\n'
+        done
+    done
+    disk_pairs=$(echo "$disk_pairs" | sort -u | grep -v '^$')
+
+    python3 -c "
+import json, os, sys
+
+accounts_path = '$ACCOUNTS_JSON'
+disk_lines = '''$disk_pairs'''.strip().split('\n')
+disk_pairs = set()
+for line in disk_lines:
+    line = line.strip()
+    if '/' in line:
+        disk_pairs.add(line)
+
+if not disk_pairs:
+    sys.exit(0)
+
+# Load existing accounts.json or start fresh
+accounts = []
+if os.path.isfile(accounts_path):
+    try:
+        with open(accounts_path) as f:
+            accounts = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        pass
+
+# Index existing entries by accountUuid/organizationUuid
+existing = {}
+by_acct = {}
+for a in accounts:
+    key = a.get('accountUuid','') + '/' + a.get('organizationUuid','')
+    existing[key] = a
+    by_acct.setdefault(a.get('accountUuid',''), []).append(a)
+
+changed = False
+for pair in sorted(disk_pairs):
+    if pair in existing:
+        continue
+    acct_uuid, org_uuid = pair.split('/')
+    # Check if this account UUID already has an entry with a different org
+    if acct_uuid in by_acct:
+        # Account exists but org changed — update the org UUID
+        entry = by_acct[acct_uuid][0]
+        old_org = entry.get('organizationUuid','')
+        if old_org != org_uuid:
+            print(f'  Updating {entry.get(\"emailAddress\",acct_uuid)}: org {old_org} -> {org_uuid}')
+            entry['organizationUuid'] = org_uuid
+            changed = True
+    else:
+        # Completely new account UUID on disk — add minimal entry
+        print(f'  Adding new account from disk: {pair}')
+        accounts.append({
+            'accountUuid': acct_uuid,
+            'organizationUuid': org_uuid,
+            'isEnabled': True,
+        })
+        changed = True
+
+if changed:
+    os.makedirs(os.path.dirname(accounts_path), exist_ok=True)
+    with open(accounts_path, 'w') as f:
+        json.dump(accounts, f, indent=2)
+        f.write('\n')
+    print('  accounts.json updated.')
+" 2>&1
+}
+
 # --- Merge and link ---
 cmd_link() {
+    # Pre-flight: reconcile accounts.json with disk state
+    update_accounts_json
+
     # Pre-flight: repair any broken symlinks before merging
     local integrity_rc=0
     check_integrity || integrity_rc=$?
@@ -324,7 +444,7 @@ cmd_link() {
     echo "Primary account: $primary ($primary_count sessions)"
     echo ""
 
-    # Merge other accounts into primary, then symlink
+    # Merge other discovered accounts into primary, then symlink
     for acct in "${accounts[@]}"; do
         [[ "$acct" == "$primary" ]] && continue
 
@@ -362,6 +482,32 @@ cmd_link() {
         echo "    Linked $acct -> $primary_dir"
     done
 
+    # Proactively create symlinks for accounts in accounts.json that don't have
+    # directories yet. This handles the window between account add and first session.
+    if [[ -f "$ACCOUNTS_JSON" ]]; then
+        local all_pairs
+        all_pairs=$(python3 -c "
+import json, sys
+with open('$ACCOUNTS_JSON') as f:
+    for a in json.load(f):
+        print(a['accountUuid'] + '/' + a['organizationUuid'])
+" 2>/dev/null) || true
+
+        while IFS= read -r pair; do
+            [[ -z "$pair" ]] && continue
+            [[ "$pair" == "$primary" ]] && continue
+            local acct_uuid="${pair%%/*}"
+            local org_uuid="${pair##*/}"
+            local org_path="$SESSIONS_DIR/$acct_uuid/$org_uuid"
+            # Skip if already exists (real dir or symlink)
+            [[ -d "$org_path" || -L "$org_path" ]] && continue
+            # Create account dir and symlink org to primary
+            mkdir -p "$SESSIONS_DIR/$acct_uuid"
+            ln -s "$primary_dir" "$org_path"
+            echo "  $pair: pre-linked (no dir existed yet) -> $primary_dir"
+        done <<< "$all_pairs"
+    fi
+
     # Do the same for local-agent-mode-sessions
     if [[ -d "$AGENT_DIR" ]]; then
         echo ""
@@ -370,32 +516,66 @@ cmd_link() {
         local primary_org="${primary##*/}"
         local primary_agent_org="$AGENT_DIR/$primary"
 
-        for acct in "${accounts[@]}"; do
-            [[ "$acct" == "$primary" ]] && continue
-            local agent_org="$AGENT_DIR/$acct"
-            local agent_acct_dir="$AGENT_DIR/${acct%%/*}"
+        # Scan local-agent-mode-sessions DIRECTLY instead of reusing the
+        # claude-code-sessions account list — Desktop can create an agent-mode org
+        # dir whose UUID never appears in claude-code-sessions (a transient org from
+        # an account switch). The old loop only iterated discover_accounts pairs, so
+        # such a dir was never linked and never re-checked, leaving it a real,
+        # unlinked dir forever. Scanning here every run catches a dir that appeared
+        # after a too-early run.
+        local agent_uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        for agent_acct_dir in "$AGENT_DIR"/*/; do
+            [[ -d "$agent_acct_dir" ]] || continue
+            local a_acct; a_acct=$(basename "$agent_acct_dir")
+            [[ "$a_acct" =~ $agent_uuid_re ]] || continue
+            [[ "$a_acct" == "$primary_acct" ]] && continue
 
-            if [[ -L "$agent_org" ]]; then
-                echo "  $acct: already a symlink, skipping."
-                continue
-            fi
+            for a_org_dir in "$agent_acct_dir"*/; do
+                [[ -d "$a_org_dir" || -L "$a_org_dir" ]] || continue
+                local a_org; a_org=$(basename "$a_org_dir")
+                [[ "$a_org" =~ $agent_uuid_re ]] || continue
 
-            if [[ -d "$agent_org" ]]; then
-                # Backup and link
-                local agent_backup="$BACKUP_DIR/agent-mode/$acct"
+                local a_pair="$a_acct/$a_org"
+                local agent_org="$AGENT_DIR/$a_pair"
+
+                if [[ -L "$agent_org" ]]; then
+                    echo "  $a_pair: already a symlink, skipping."
+                    continue
+                fi
+                if [[ ! -d "$primary_agent_org" ]]; then
+                    echo "  Primary agent dir doesn't exist, skipping $a_pair."
+                    continue
+                fi
+
+                local agent_backup="$BACKUP_DIR/agent-mode/$a_pair"
                 mkdir -p "$(dirname "$agent_backup")"
                 mv "$agent_org" "$agent_backup"
                 echo "  Backed up agent config to $agent_backup"
-            fi
-
-            mkdir -p "$agent_acct_dir"
-            if [[ -d "$primary_agent_org" ]]; then
                 ln -s "$primary_agent_org" "$agent_org"
-                echo "  Linked $acct -> $primary_agent_org"
-            else
-                echo "  Primary agent dir doesn't exist, skipping."
-            fi
+                echo "  Linked $a_pair -> $primary_agent_org"
+            done
         done
+
+        # Proactively create agent-mode symlinks for accounts without directories
+        if [[ -d "$primary_agent_org" ]] && [[ -f "$ACCOUNTS_JSON" ]]; then
+            local agent_all_pairs
+            agent_all_pairs=$(python3 -c "
+import json, sys
+with open('$ACCOUNTS_JSON') as f:
+    for a in json.load(f):
+        print(a['accountUuid'] + '/' + a['organizationUuid'])
+" 2>/dev/null) || true
+
+            while IFS= read -r pair; do
+                [[ -z "$pair" ]] && continue
+                [[ "$pair" == "$primary" ]] && continue
+                local agent_org="$AGENT_DIR/$pair"
+                [[ -d "$agent_org" || -L "$agent_org" ]] && continue
+                mkdir -p "$AGENT_DIR/${pair%%/*}"
+                ln -s "$primary_agent_org" "$agent_org"
+                echo "  $pair: pre-linked (no dir existed yet) -> $primary_agent_org"
+            done <<< "$agent_all_pairs"
+        fi
     fi
 
     echo ""
