@@ -655,8 +655,6 @@ cmd_install() {
 	<array>
 		<string>$SESSIONS_DIR</string>
 	</array>
-	<key>StartInterval</key>
-	<integer>60</integer>
 	<key>StandardOutPath</key>
 	<string>/tmp/claude-account-sync.log</string>
 	<key>StandardErrorPath</key>
