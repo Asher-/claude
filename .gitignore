@@ -1,2 +1,11 @@
 # Compatibility symlink (not committed)
 onshape-mcp
+
+# local agent config (machine-local)
+.claude/
+# db schema backups
+brain-backups/
+# personal scratch (not project content)
+misc/
+# public apple signing cert (downloadable)
+macos/AppleWWDRCAG3.cer
