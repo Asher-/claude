@@ -9,3 +9,6 @@ brain-backups/
 misc/
 # public apple signing cert (downloadable)
 macos/AppleWWDRCAG3.cer
+# local dev workspaces (not project content)
+craft_agents/
+macos/claude_desktop/
