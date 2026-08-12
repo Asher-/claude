@@ -374,6 +374,29 @@ if changed:
 
 # --- Merge and link ---
 cmd_link() {
+    # REFUSED 2026-08-12 (session 2ddd5155). This arm creates symlinked
+    # <acct>/<org> session directories -- four `ln -s` sites below. Claude
+    # Desktop opens its per-account storage dir with
+    # O_RDONLY|O_DIRECTORY|O_NOFOLLOW, which returns ENOTDIR on a
+    # symlink-to-directory and silently ends ALL session persistence. That is
+    # the exact failure plan://brain/ccd/session/index/write/failure exists to
+    # eliminate, and the live store measures symlink-free today ONLY because no
+    # launchd agent currently runs this arm.
+    #
+    # The job now belongs to brain/scripts/claude-session-store.sh, which does
+    # it with real directories and hardlinks. Measured disposition and the four
+    # site line numbers: bug://brain/session_store/account_sync/rearm/premise.
+    #
+    # Guarded rather than deleted: the user ruled 2026-08-08 that this script is
+    # still needed and "needs to be updated accordingly", and cmd_status plus
+    # update_accounts_json/find_new_org_dir remain live until task .4 moves the
+    # accounts.json currency job into claude-server's add.
+    echo "REFUSED: this arm symlinks account dirs, which re-creates the ENOTDIR" >&2
+    echo "         session-index failure (Desktop opens the dir O_NOFOLLOW)." >&2
+    echo "         Use instead:" >&2
+    echo "           bash ~/Dropbox/Projects/claude/brain/scripts/claude-session-store.sh repair --apply" >&2
+    return 1
+
     # Pre-flight: reconcile accounts.json with disk state
     update_accounts_json
 
@@ -634,6 +657,17 @@ cmd_unlink() {
 
 # --- Install launchd agent ---
 cmd_install() {
+    # REFUSED 2026-08-12 (session 2ddd5155). This installs a launchd agent whose
+    # ProgramArguments run the DEFAULT dispatch arm -- cmd_link -- on directory
+    # changes. cmd_link is refused above because it symlinks account dirs and
+    # re-arms the ENOTDIR session-index failure; an agent that calls it would
+    # restore that failure automatically and unattended.
+    # See bug://brain/session_store/account_sync/rearm/premise.
+    echo "REFUSED: this would install an agent that runs the symlinking arm." >&2
+    echo "         The session-store reconciler is ai.strong.claude-session-store," >&2
+    echo "         installed by brain/scripts/claude-session-store.sh install." >&2
+    return 1
+
     if launchctl list "$PLIST_LABEL" &>/dev/null; then
         echo "Launchd agent already installed. Updating..."
         launchctl unload "$PLIST_PATH" 2>/dev/null
