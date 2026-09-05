@@ -25,3 +25,6 @@
 [submodule "macos/hopper-mcp"]
 	path = macos/hopper-mcp
 	url = git@github.com:StrongAI/claude-macos-hopper-mcp.git
+[submodule "misc"]
+	path = misc
+	url = git@github.com:StrongAI/misc.git

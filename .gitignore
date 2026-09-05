@@ -5,8 +5,6 @@ onshape-mcp
 .claude/
 # db schema backups
 brain-backups/
-# personal scratch (not project content)
-misc/
 # public apple signing cert (downloadable)
 macos/AppleWWDRCAG3.cer
 # local dev workspaces (not project content)
