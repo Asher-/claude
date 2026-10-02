@@ -630,6 +630,48 @@ t_fallback_title_without_timestamp() {
 	drop_store
 }
 
+t_dropped_session_lists_every_title() {
+	# A session no copy keeps loses a sidebar row in every workspace dir, so each
+	# distinct title its copies carry is listed, with that copy's reason. Copies
+	# sharing a title share one line.
+	new_store
+	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
+	mk_ref s-newer "4: newer session"
+	mk_tx s-split 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-split "4: held in one sidebar" 9
+	mk_ref s-split "scratch in the other" 5 "$WS2"
+	mk_tx s-same 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-same "same scratch everywhere" 5
+	mk_ref s-same "same scratch everywhere" 9 "$WS2"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(dropped)" "4: held in one sidebar" "the first copy's title is listed"
+	assert_contains "$(dropped)" "#4 is held by a newer session" "with its reason"
+	assert_contains "$(dropped)" "scratch in the other" "the other copy's title is listed too"
+	assert_eq "$(dropped | grep -c 'same scratch everywhere')" "1" \
+		"copies sharing a title are listed once"
+	assert_contains "$out" "dropping: 2   (sessions)" "the count is of sessions"
+	drop_store
+}
+
+t_transcripts_are_opened_read_only() {
+	# With every transcript stripped of write permission, an open for writing
+	# fails, so the run still reading their titles and timestamps shows each one
+	# was opened for reading only.
+	new_store
+	mk_tx s-a 2026-09-16T04:00:00.000Z "1: titled in the transcript" 0 0
+	mk_tx s-b 2026-09-10T00:00:00.000Z "" 0 0
+	mk_ref s-a; mk_ref s-b "1: older"
+	chmod a-w "$TH/.claude/projects/-proj-a/"*.jsonl
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(kept)" "1: titled in the transcript" "a read-only transcript's title is read"
+	assert_contains "$(dropped)" "1: older" "and its last entry orders the session"
+	drop_store
+}
+
 t_stock_bash_constructs_only() {
 	# Every other test runs the script under /bin/bash 3.2, which rejects an
 	# associative array or mapfile when it reaches one but runs process
@@ -664,6 +706,8 @@ t_unparseable_reference_aborts_before_unlinking
 t_any_copy_can_keep_a_session
 t_fallback_title_without_timestamp
 t_stock_bash_constructs_only
+t_dropped_session_lists_every_title
+t_transcripts_are_opened_read_only
 "
 
 for t in $TESTS; do

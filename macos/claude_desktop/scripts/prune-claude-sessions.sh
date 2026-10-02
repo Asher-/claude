@@ -86,7 +86,8 @@
 #     - a number already seen -> an older batch's reuse of it, try the next copy
 #     - anything else -> try the next copy
 #
-#   A session no copy keeps is dropped.
+#   A session no copy keeps is dropped, and listed under every distinct title
+#   its copies carry.
 #
 #   Numbering restarts per batch and the walk is newest-first, so first-seen wins
 #   and the older batch's #3 loses to the current #3 without any extra machinery.
@@ -355,8 +356,9 @@ awk -F'\t' -v OFS='\t' '
 # ------------------------------------------------------------------ the walk
 #
 # A session's copies are tried in order until one keeps it, and the copy that
-# keeps it is the one staged. A session no copy keeps is listed once, under its
-# first copy's title and reason.
+# keeps it is the one staged. A session no copy keeps is listed under every
+# distinct title its copies carry, each with that copy's reason, so every
+# sidebar row it loses is shown. Copies sharing a title share one line.
 #
 # stage rows:   reference path \t number-or-* \t title
 # dropped rows: reason \t title
@@ -364,15 +366,25 @@ awk -F'\t' -v OFS='\t' '
 : >"$TMP/stage"
 : >"$TMP/dropped"
 
+NL='
+'
 seen=" "
 cur=""
 kept=0
-why=""
-why_title=""
+pending=""
+n_drop=0
+
+pend() { # $1=reason $2=title — add a drop row for this session, once
+	case "$NL$pending" in
+	*"$NL$1$TAB$2$NL"*) ;;
+	*) pending="$pending$1$TAB$2$NL" ;;
+	esac
+}
 
 settle() {
 	if [ -n "$cur" ] && [ "$kept" -eq 0 ]; then
-		printf '%s\t%s\n' "$why" "$why_title" >>"$TMP/dropped"
+		printf '%s' "$pending" >>"$TMP/dropped"
+		n_drop=$((n_drop + 1))
 	fi
 }
 
@@ -383,8 +395,7 @@ while IFS="$TAB" read -r key cli rank la path title; do
 		settle
 		cur="$cli"
 		kept=0
-		why=""
-		why_title=""
+		pending=""
 	fi
 	[ "$kept" -eq 0 ] || continue
 
@@ -402,20 +413,14 @@ while IFS="$TAB" read -r key cli rank la path title; do
 
 	cand="${trimmed%%[!0-9]*}"
 	if [ -z "$cand" ]; then
-		if [ -z "$why" ]; then
-			why="unnumbered"
-			why_title="${title:-(untitled)}"
-		fi
+		pend "unnumbered" "${title:-(untitled)}"
 		continue
 	fi
 	num=$((10#$cand))
 
 	case "$seen" in
 	*" $num "*)
-		if [ -z "$why" ]; then
-			why="#$num is held by a newer session"
-			why_title="$title"
-		fi
+		pend "#$num is held by a newer session" "$title"
 		continue
 		;;
 	esac
@@ -426,7 +431,6 @@ done <"$TMP/sessions"
 settle
 
 n_keep=$(wc -l <"$TMP/stage" | tr -d ' ')
-n_drop=$(wc -l <"$TMP/dropped" | tr -d ' ')
 
 targets=()
 for ws in "$STORE"/*/*/; do
@@ -436,7 +440,7 @@ done
 
 echo "store:      $STORE"
 echo "sessions:   $n_sessions distinct   ($n_refs reference file(s) across ${#targets[@]} dir(s))"
-echo "keeping:    $n_keep   dropping: $n_drop"
+echo "keeping:    $n_keep   dropping: $n_drop   (sessions)"
 echo
 
 echo "keeping:"
