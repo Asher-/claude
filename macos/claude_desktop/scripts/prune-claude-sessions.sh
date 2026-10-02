@@ -20,9 +20,11 @@
 #   Skipping them is how a session was lost. A version that walked the transcript
 #   store kept a watermark and a cached keep set so it could ignore transcripts
 #   older than its last run, and read each title from the transcript's tail. On
-#   2026-10-02 it dropped a session the sidebar showed as "17: ...": either its
-#   transcript sat below the watermark with no cached row to carry it, or its
-#   title sat outside the tail window. Both routes are gone.
+#   2026-10-02 it dropped a session the sidebar showed as "17: ...". The cause was
+#   never established — that session's custom-title was later measured 984 bytes
+#   from the end of its transcript, well inside the window — so this version takes
+#   neither input: it keeps no state between runs and reads the title from the
+#   reference.
 #
 # THE TITLE IS THE REFERENCE'S .title
 #   That is the title the sidebar shows and the one you edit, so the number and

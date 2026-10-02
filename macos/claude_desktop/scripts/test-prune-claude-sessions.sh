@@ -189,6 +189,17 @@ listing() { # $1=dir — the reference files in it, sorted, space-joined
 	ls "$1" | sort | tr '\n' ' '
 }
 
+# Every entry under the transcript store with its type, size and mtime, then a
+# checksum of every file, so a file created, removed or rewritten anywhere in the
+# store changes the snapshot.
+store_snapshot() {
+	(
+		cd "$TH/.claude/projects" &&
+			find . -print | sort | while IFS= read -r p; do stat -f '%N %HT %z %m' "$p"; done &&
+			find . -type f -print | sort | xargs cksum
+	)
+}
+
 assert_clean_run() { # $1=output
 	local rc; rc="$(run_rc)"
 	if [ "$rc" != "0" ]; then
@@ -427,12 +438,17 @@ t_transcripts_are_never_written() {
 	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
 	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
 	mk_ref s-keep "1: keep"; mk_ref s-drop ""
+	# A second project dir, so a write anywhere in the store shows, not only one
+	# beside the transcripts the run reads.
+	mkdir -p "$TH/.claude/projects/-proj-b"
+	printf '{"type":"user","timestamp":"2026-09-01T00:00:00.000Z","text":"hello"}\n' \
+		>"$TH/.claude/projects/-proj-b/s-other.jsonl"
 	local before after
-	before="$(cd "$TH/.claude/projects/-proj-a" && stat -f '%N %m %z' ./*.jsonl && cksum ./*.jsonl)"
+	before="$(store_snapshot)"
 	local out; out="$(run)"
 	assert_clean_run "$out"
-	after="$(cd "$TH/.claude/projects/-proj-a" && stat -f '%N %m %z' ./*.jsonl && cksum ./*.jsonl)"
-	assert_eq "$after" "$before" "no transcript changed content, size or mtime"
+	after="$(store_snapshot)"
+	assert_eq "$after" "$before" "nothing under the transcript store was created, removed or changed"
 	drop_store
 }
 
