@@ -220,6 +220,24 @@ t_tail_only_reads() {
 	drop_store
 }
 
+t_fallback_title_is_tail_only() {
+	# The fallback reads the transcript's tail and nothing more. With no .title on
+	# the reference and the custom-title pushed 400KB past the window, a whole-file
+	# read would find the title, so finding it means one was reintroduced.
+	new_store
+	mk_tx s-far 2026-09-16T04:00:00.000Z "9: buried past the window" 0 400
+	mk_tx s-near 2026-09-16T03:00:00.000Z "1: visible" 0 0
+	mk_ref s-far; mk_ref s-near
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_no_shim_violation
+	assert_not_contains "$out" "9: buried past the window" \
+		"a fallback title beyond the tail window is NOT found (no whole-file read)"
+	assert_contains "$(kept)" "1: visible" "the in-window fallback title is still found"
+	drop_store
+}
+
 t_reference_title_wins() {
 	new_store
 	mk_tx s-pin 2026-09-16T04:00:00.000Z "3: stale transcript title" 0 0
@@ -442,6 +460,7 @@ t_relink_shares_one_inode() {
 
 TESTS="
 t_tail_only_reads
+t_fallback_title_is_tail_only
 t_reference_title_wins
 t_title_beyond_window_is_kept
 t_untouched_session_is_decided_every_run
