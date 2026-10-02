@@ -12,6 +12,8 @@
 #
 #   - the number comes from the reference's .title, even when the transcript
 #     says otherwise or its custom-title sits beyond the tail window;
+#   - a session whose reference copies carry different titles is kept if any
+#     copy would keep it;
 #   - a session is decided on every run however old its transcript is and
 #     whatever earlier runs did, and no cache file is read or written;
 #   - a transcript with no reference can never claim a number;
@@ -549,6 +551,77 @@ t_unparseable_reference_aborts_before_unlinking() {
 	drop_store
 }
 
+t_any_copy_can_keep_a_session() {
+	# Each session below has a reference in two workspace dirs as two inodes whose
+	# titles have drifted apart. Each sidebar shows its own copy, so the session is
+	# kept if any copy would keep it, and every dir ends up sharing that copy.
+	new_store
+	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
+	mk_ref s-newer "4: newer session"
+	# Numbered in one sidebar, unnumbered in the newer copy.
+	mk_tx s-num 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-num "17: numbered in one sidebar" 5
+	mk_ref s-num "scratch in the other" 9 "$WS2"
+	# Pinned in one sidebar, numbered in the newer copy.
+	mk_tx s-pin 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-pin "* pinned in one sidebar" 5
+	mk_ref s-pin "12: numbered in the other" 9 "$WS2"
+	# The newer copy's number is held by a newer session; the older copy's is free.
+	mk_tx s-two 2026-09-16T02:00:00.000Z "" 0 0
+	mk_ref s-two "8: free in one sidebar" 5
+	mk_ref s-two "4: taken in the other" 9 "$WS2"
+	local num_inode pin_inode two_inode
+	num_inode="$(stat -f '%i' "$WS/local_s-num.json")"
+	pin_inode="$(stat -f '%i' "$WS/local_s-pin.json")"
+	two_inode="$(stat -f '%i' "$WS/local_s-two.json")"
+	local out; out="$(run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(kept)" "17: numbered in one sidebar" \
+		"a numbered copy keeps the session over a newer unnumbered copy"
+	assert_contains "$(kept)" "* pinned in one sidebar" \
+		"a pinned copy keeps the session over a newer numbered copy"
+	assert_contains "$(kept)" "8: free in one sidebar" \
+		"a copy whose number is free keeps the session when the newer copy's number is held"
+	assert_eq "$(dropped)" "" "no session is dropped"
+	assert_eq "$(stat -f '%i' "$WS2/local_s-num.json")" "$num_inode" \
+		"every dir shares the numbered copy's inode"
+	assert_eq "$(stat -f '%i' "$WS2/local_s-pin.json")" "$pin_inode" \
+		"every dir shares the pinned copy's inode"
+	assert_eq "$(stat -f '%i' "$WS2/local_s-two.json")" "$two_inode" \
+		"every dir shares the inode of the copy whose number was free"
+	drop_store
+}
+
+t_fallback_title_without_timestamp() {
+	# A transcript holding a custom-title and no timestamp anywhere, behind a
+	# reference with no .title. The title still reaches the reference, and the
+	# session is ordered by the reference's .lastActivityAt: 1789862400000 is
+	# 2026-09-20T00:00:00Z in milliseconds, newer than the other #2's last entry.
+	new_store
+	"$REAL_JQ" -nc '{type:"custom-title",customTitle:"2: titled, never stamped"}' \
+		>"$TH/.claude/projects/-proj-a/s-nostamp.jsonl"
+	mk_ref s-nostamp "" 1789862400000
+	mk_tx s-old2 2026-09-10T00:00:00.000Z "" 0 0
+	mk_ref s-old2 "2: older"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_no_shim_violation
+	assert_contains "$(kept)" "2: titled, never stamped" \
+		"a transcript with no timestamp still supplies the fallback title"
+	assert_contains "$(dropped)" "2: older" "and its session is ordered by .lastActivityAt"
+	drop_store
+}
+
+t_stock_bash_constructs_only() {
+	# Every other test runs the script under /bin/bash 3.2, which rejects an
+	# associative array or mapfile when it reaches one but runs process
+	# substitution, so the source is read for all three.
+	local hits; hits="$("$REAL_GREP" -nE '<\(|>\(|declare -A|mapfile|readarray' "$SCRIPT")"
+	assert_eq "$hits" "" "no associative array, mapfile or process substitution in the script"
+}
+
 # ---------------------------------------------------------------- runner
 
 TESTS="
@@ -572,6 +645,9 @@ t_only_referenced_transcripts_are_read
 t_applied_run_lists_drops
 t_reference_without_session_id_is_decided
 t_unparseable_reference_aborts_before_unlinking
+t_any_copy_can_keep_a_session
+t_fallback_title_without_timestamp
+t_stock_bash_constructs_only
 "
 
 for t in $TESTS; do
