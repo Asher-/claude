@@ -198,6 +198,13 @@ STORE="$(cd "$DIR/../.." && pwd)"
 # becomes the one shared by all dirs. The ISO column is the ordering fallback for
 # a session whose transcript has no timestamp; a numeric .lastActivityAt above
 # 1e11 is read as milliseconds.
+#
+# A reference with no .cliSessionId is keyed by its own path instead, so it is
+# still decided by its .title and still listed if dropped. Keying it as "" would
+# filter it out here and the relink would delete it without a word.
+#
+# A reference jq cannot parse fails the pipeline, and set -e stops the run
+# before anything is unlinked.
 
 refs=()
 for ws in "$STORE"/*/*/; do
@@ -209,7 +216,8 @@ done
 printf '%s\0' "${refs[@]}" |
 	xargs -0 jq -r '
 		(.lastActivityAt // 0) as $l
-		| [ (.cliSessionId // ""), $l, input_filename, (.title // ""),
+		| (.cliSessionId // "") as $c
+		| [ (if $c == "" then "ref:" + input_filename else $c end), $l, input_filename, (.title // ""),
 		    (if ($l | type) == "number"
 		     then (if $l > 100000000000 then $l / 1000 else $l end | floor | todate)
 		     else ($l | tostring) end) ]

@@ -163,8 +163,11 @@ mk_ref() {
 
 # run() is invoked as $(run ...), so its body executes in a SUBSHELL and any
 # variable it sets is lost on return. The status goes to a file instead.
+#
+# The script runs under /bin/bash, the stock macOS 3.2 it is written for, never
+# whichever newer bash the shebang would find first on PATH.
 run() { # args passed through; echoes combined output, records the exit status
-	HOME="$TH" PATH="$TH/bin:$PATH" "$SCRIPT" "$@" >"$TH/run.out" 2>&1
+	HOME="$TH" PATH="$TH/bin:$PATH" /bin/bash "$SCRIPT" "$@" >"$TH/run.out" 2>&1
 	echo $? >"$TH/run.rc"
 	cat "$TH/run.out"
 }
@@ -456,6 +459,96 @@ t_relink_shares_one_inode() {
 	drop_store
 }
 
+t_order_is_last_entry_not_mtime() {
+	new_store
+	mk_tx s-old 2026-09-10T00:00:00.000Z "" 0 0
+	mk_tx s-new 2026-09-16T00:00:00.000Z "" 0 0
+	# Opening a session bumps its mtime without adding an entry.
+	touch "$TH/.claude/projects/-proj-a/s-old.jsonl"
+	mk_ref s-old "3: older entry, newer mtime"; mk_ref s-new "3: newer entry"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(kept)" "3: newer entry" "the newer LAST ENTRY wins the number"
+	assert_contains "$(dropped)" "3: older entry, newer mtime" "a newer mtime does not"
+	drop_store
+}
+
+t_timestamp_beyond_window_reads_whole_file() {
+	# One final line longer than the window: the tail holds no timestamp, so the
+	# whole-file fallback is the only way to order this session by its entry.
+	new_store
+	printf '{"type":"user","timestamp":"2026-09-20T00:00:00.000Z","text":"%s"}\n' \
+		"$("$REAL_PERL" -e 'print "x" x 300000')" >"$TH/.claude/projects/-proj-a/s-long.jsonl"
+	mk_tx s-short 2026-09-16T00:00:00.000Z "" 0 0
+	mk_ref s-long "6: final line longer than the window"; mk_ref s-short "6: short"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_no_shim_violation
+	assert_contains "$(kept)" "6: final line longer than the window" \
+		"the timestamp of a final line longer than the window is still read"
+	assert_contains "$(dropped)" "6: short" "so the older #6 loses"
+	drop_store
+}
+
+t_only_referenced_transcripts_are_read() {
+	new_store
+	mk_tx s-ref 2026-09-10T00:00:00.000Z "" 0 0
+	mk_tx s-orphan 2026-09-20T00:00:00.000Z "" 0 0
+	mk_ref s-ref "1: referenced"
+	# A perl shim that records every path the tail reader is handed on stdin.
+	printf '#!/bin/bash\ntee -a "%s" | "%s" "$@"\n' "$TH/perl-stdin" "$REAL_PERL" >"$TH/bin/perl"
+	chmod +x "$TH/bin/perl"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(cat "$TH/perl-stdin")" "s-ref.jsonl" "the referenced transcript is read"
+	assert_not_contains "$(cat "$TH/perl-stdin")" "s-orphan.jsonl" "a transcript with no reference is never read"
+	drop_store
+}
+
+t_applied_run_lists_drops() {
+	new_store
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"; mk_ref s-drop "scratch session"
+	local out; out="$(run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(dropped)" "scratch session" "an applied run lists the row it drops"
+	assert_eq "$(listing "$WS")" "local_s-keep.json " "and the listed row is the one unlinked"
+	drop_store
+}
+
+t_reference_without_session_id_is_decided() {
+	new_store
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"
+	"$REAL_JQ" -nc '{lastActivityAt:1,title:"7: no session id"}' >"$WS/local_nocli-a.json"
+	"$REAL_JQ" -nc '{lastActivityAt:1,title:"scratch with no session id"}' >"$WS/local_nocli-b.json"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(kept)" "7: no session id" "a numbered reference with no .cliSessionId is kept"
+	assert_contains "$(dropped)" "scratch with no session id" \
+		"an unnumbered reference with no .cliSessionId is listed as dropped"
+	drop_store
+}
+
+t_unparseable_reference_aborts_before_unlinking() {
+	new_store
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"
+	printf '{not json' >"$WS/local_broken.json"
+	run >/dev/null 2>&1
+
+	assert_eq "$([ "$(run_rc)" = 0 ] && echo zero || echo nonzero)" "nonzero" \
+		"a reference jq cannot parse fails the run"
+	assert_eq "$(listing "$WS")" "local_broken.json local_s-keep.json " "and nothing is unlinked"
+	drop_store
+}
+
 # ---------------------------------------------------------------- runner
 
 TESTS="
@@ -473,6 +566,12 @@ t_no_backups
 t_removed_options_are_rejected
 t_transcripts_are_never_written
 t_relink_shares_one_inode
+t_order_is_last_entry_not_mtime
+t_timestamp_beyond_window_reads_whole_file
+t_only_referenced_transcripts_are_read
+t_applied_run_lists_drops
+t_reference_without_session_id_is_decided
+t_unparseable_reference_aborts_before_unlinking
 "
 
 for t in $TESTS; do
