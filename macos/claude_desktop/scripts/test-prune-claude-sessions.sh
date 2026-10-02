@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
 # test-prune-claude-sessions.sh — prove the constraints of
-# plan://claude_desktop/prune_read_bounding against a synthetic store.
+# plan://claude_desktop/prune_reference_authority against a synthetic store.
 #
 # Every test builds a throwaway HOME and points the script at it, so nothing here
-# can touch the real transcript store, the real session store or the real cache.
+# can touch the real transcript store or the real session store.
 #
-# The two constraints that matter most are checked from BOTH sides:
+# The constraint that matters most is that a session the SIDEBAR shows as
+# numbered or pinned is never dropped for want of something else. It is checked
+# from every side a decision could leak through:
 #
-#   "never read a whole transcript"
-#       - a PATH shim records a violation if grep, tail or jq is ever handed a
-#         .jsonl path (the positive check: those forks are gone), AND
-#       - a transcript whose only custom-title sits BEYOND the tail window must
-#         come back untitled (the negative check: a whole-file read would find
-#         it, so finding it means one was reintroduced).
+#   - the number comes from the reference's .title, even when the transcript
+#     says otherwise or its custom-title sits beyond the tail window;
+#   - a session is decided on every run however old its transcript is and
+#     whatever earlier runs did, and no cache file is read or written;
+#   - a transcript with no reference can never claim a number;
+#   - every dropped row is printed with its reason.
 #
-#   "never read all the sessions"
-#       - the watermark must equal the NEWEST last-entry observed, and a pinned
-#         session far below it must not drag it down, AND
-#       - the second run's candidate count must cover only what changed.
+# "Never read a whole transcript" is checked by a PATH shim that records a
+# violation if grep, tail or jq is ever handed a .jsonl path.
 #
 # Usage:  scripts/test-prune-claude-sessions.sh          run all
 #         scripts/test-prune-claude-sessions.sh t_pins   run matching tests
@@ -45,10 +45,10 @@ ok()  { printf '    %sok%s   %s\n' "$GREEN" "$OFF" "$1"; }
 bad() {
 	printf '    %sFAIL%s %s\n' "$RED" "$OFF" "$1"
 	fail_ctx="$fail_ctx|$1"
-	# The last run's own summary is almost always the explanation, so show it
+	# The last run's own report is almost always the explanation, so show it
 	# rather than making the reader re-derive the fixture by hand.
 	if [ -n "${TH:-}" ] && [ -f "$TH/run.out" ]; then
-		sed -n '1,8p' "$TH/run.out" | sed 's/^/         > /'
+		sed -n '1,20p' "$TH/run.out" | sed 's/^/         > /'
 	fi
 }
 
@@ -110,9 +110,8 @@ drop_store() { [ -n "$TH" ] && rm -rf "$TH"; TH=""; }
 # iso8601 (…Z) -> touch -t stamp.
 #
 # ALWAYS apply it as `TZ=UTC touch -t`. touch parses -t in LOCAL time, while the
-# script derives the watermark epoch from the transcript's UTC timestamp, so a
-# bare touch offsets every fixture mtime by the local UTC offset and the mtime
-# prefilter admits transcripts it should have excluded.
+# fixture timestamps are UTC, so a bare touch offsets every fixture mtime by the
+# local UTC offset.
 touch_stamp() { # $1=2026-09-16T04:05:06.000Z
 	local s="${1%%.*}"
 	s="${s//-/}"; s="${s//:/}"; s="${s/T/}"
@@ -131,12 +130,11 @@ filler_lines() { # $1=kb
 # mk_tx <cli> <iso-ts> [title] [pad_before_kb] [pad_after_kb]
 #
 # Writes a transcript whose LAST timestamp is <iso-ts> and whose LAST
-# custom-title is <title>.
+# custom-title is <title>, with its mtime set to <iso-ts>.
 #
 #   pad_before — filler BEFORE the title. Makes a large file whose title still
-#                sits near the end. A correct tail reader finds it.
+#                sits near the end.
 #   pad_after  — filler AFTER the title, pushing it out of the tail window.
-#                A correct tail reader must NOT find it.
 mk_tx() {
 	local cli="$1" ts="$2" title="${3:-}" before="${4:-0}" after="${5:-0}"
 	local f="$TH/.claude/projects/-proj-a/$cli.jsonl"
@@ -153,34 +151,18 @@ mk_tx() {
 	TZ=UTC touch -t "$(touch_stamp "$ts")" "$f"
 }
 
-# mk_ref <cli> [lastActivityAt] [dir]
-mk_ref() {
-	local cli="$1" la="${2:-1}" dir="${3:-$WS}"
-	"$REAL_JQ" -nc --arg c "$cli" --argjson l "$la" \
-		'{cliSessionId:$c,lastActivityAt:$l,title:"ignored"}' >"$dir/local_$cli.json"
-}
-
-# retitle_quietly <cli> <new-title> <keep-this-mtime-iso>
+# mk_ref <cli> [title] [lastActivityAt] [dir]
 #
-# Rewrites the title and RESTORES the old mtime, so the session stays below the
-# watermark. This is the only way to exercise the pin re-check: an ordinary
-# retitle bumps mtime, and then the walk would pick it up instead.
-retitle_quietly() {
-	local cli="$1" title="$2" ts="$3"
-	local f="$TH/.claude/projects/-proj-a/$cli.jsonl"
-	{
-		printf '{"type":"user","timestamp":"2026-01-01T00:00:00.000Z","text":"hello"}\n'
-		"$REAL_JQ" -nc --arg t "$title" \
-			'{type:"custom-title",customTitle:$t,timestamp:"2026-01-01T00:00:01.000Z"}'
-		printf '{"type":"assistant","timestamp":"%s","text":"bye"}\n' "$ts"
-	} >"$f.rewrite"
-	mv "$f.rewrite" "$f"
-	TZ=UTC touch -t "$(touch_stamp "$ts")" "$f"
+# The title is the reference's .title, the one the sidebar shows. An empty title
+# is written as "", which sends the script to the transcript's custom-title.
+mk_ref() {
+	local cli="$1" title="${2:-}" la="${3:-1}" dir="${4:-$WS}"
+	"$REAL_JQ" -nc --arg c "$cli" --arg t "$title" --argjson l "$la" \
+		'{cliSessionId:$c,lastActivityAt:$l,title:$t}' >"$dir/local_$cli.json"
 }
 
 # run() is invoked as $(run ...), so its body executes in a SUBSHELL and any
-# variable it sets is lost on return — an earlier version leaked one test's
-# exit status into every later test. The status goes to a file instead.
+# variable it sets is lost on return. The status goes to a file instead.
 run() { # args passed through; echoes combined output, records the exit status
 	HOME="$TH" PATH="$TH/bin:$PATH" "$SCRIPT" "$@" >"$TH/run.out" 2>&1
 	echo $? >"$TH/run.rc"
@@ -189,9 +171,17 @@ run() { # args passed through; echoes combined output, records the exit status
 
 run_rc() { cat "$TH/run.rc" 2>/dev/null || echo "?"; }
 
-cache_field() { # $1=row-type $2=column
-	[ -f "$TH/.claude-prune-cache.tsv" ] || { printf '<no cache file>'; return; }
-	awk -F'\t' -v k="$1" -v c="$2" '$1 == k { print $c; exit }' "$TH/.claude-prune-cache.tsv"
+# The report's "keeping:" and "dropping:" sections, one row per line. A dropped
+# title is printed too, so "is it kept" must be asked of the right section,
+# never of the whole output.
+section() { # $1=header
+	awk -v h="$1:" '$0 == h { f = 1; next } $0 == "" { f = 0 } f' "$TH/run.out"
+}
+kept()    { section keeping; }
+dropped() { section dropping; }
+
+listing() { # $1=dir — the reference files in it, sorted, space-joined
+	ls "$1" | sort | tr '\n' ' '
 }
 
 assert_clean_run() { # $1=output
@@ -223,200 +213,168 @@ t_tail_only_reads() {
 
 	assert_clean_run "$out"
 	assert_no_shim_violation
-	assert_contains "$out" "1: current" "a normal title is read"
-	assert_contains "$out" "2: big, titled near the end" \
-		"a title inside the window is read even in a 400KB transcript"
+	assert_contains "$(kept)" "1: current" \
+		"a reference with no .title falls back to the transcript's custom-title"
+	assert_contains "$(kept)" "2: big, titled near the end" \
+		"the fallback title is read from the tail of a 400KB transcript"
 	drop_store
 }
 
-t_title_beyond_window_is_not_found() {
-	# 400KB of filler AFTER the title pushes it past the 256K window. A whole-file
-	# read would still find it, so finding it here means one was reintroduced.
+t_reference_title_wins() {
 	new_store
-	mk_tx s-far 2026-09-16T04:00:00.000Z "9: buried past the window" 0 400
-	mk_tx s-near 2026-09-16T03:00:00.000Z "1: visible" 0 0
-	mk_ref s-far; mk_ref s-near
+	mk_tx s-pin 2026-09-16T04:00:00.000Z "3: stale transcript title" 0 0
+	mk_tx s-plain 2026-09-16T03:00:00.000Z "4: stale transcript title" 0 0
+	mk_ref s-pin "* pinned in the sidebar"
+	mk_ref s-plain "renamed in the sidebar"
 	local out; out="$(run --dry-run)"
 
+	assert_clean_run "$out"
+	assert_contains "$(kept)" "* pinned in the sidebar" \
+		"the reference's pin wins over the transcript's number"
+	assert_contains "$(dropped)" "renamed in the sidebar" \
+		"the reference's unnumbered title wins over the transcript's number"
+	assert_not_contains "$out" "stale transcript title" \
+		"the transcript's title is not used when the reference has one"
+	drop_store
+}
+
+t_title_beyond_window_is_kept() {
+	# 400KB of filler AFTER the custom-title pushes it past the 256K window. The
+	# sidebar still shows the number, so the session must be kept.
+	new_store
+	mk_tx s-far 2026-09-16T04:00:00.000Z "17: mux and serena" 0 400
+	mk_tx s-near 2026-09-16T03:00:00.000Z "1: visible" 0 0
+	mk_ref s-far "17: mux and serena"; mk_ref s-near "1: visible"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
 	assert_no_shim_violation
-	assert_not_contains "$out" "9: buried past the window" \
-		"a title beyond the tail window is NOT found (no whole-file fallback)"
-	assert_contains "$out" "1: visible" "the in-window title is still found"
+	assert_contains "$(kept)" "17: mux and serena" \
+		"a numbered row is kept though its transcript's custom-title is beyond the tail window"
+	assert_contains "$(kept)" "1: visible" "the other numbered row is kept"
 	drop_store
 }
 
-t_watermark_is_the_newest_entry() {
+t_untouched_session_is_decided_every_run() {
 	new_store
-	mk_tx s-a 2026-09-10T00:00:00.000Z "1: older" 0 0
-	mk_tx s-b 2026-09-16T04:00:00.000Z "2: newest" 0 0
-	mk_ref s-a; mk_ref s-b
-	local out; out="$(run)"
-
-	assert_clean_run "$out"
-	assert_eq "$(cache_field floor 3)" "2026-09-16T04:00:00.000Z" \
-		"watermark equals the NEWEST last-entry, not the oldest keeper"
-	assert_eq "$(cache_field version 2)" "2" "cache carries a version row"
-	drop_store
-}
-
-t_old_pin_does_not_drag_the_watermark() {
-	# The exact defect this plan exists for: pins are keepers and pins are old, so
-	# a floor taken from the keep set sinks to the oldest pin and never climbs.
-	new_store
-	mk_tx s-pin 2026-01-05T00:00:00.000Z "* ancient pin" 0 0
-	mk_tx s-now 2026-09-16T04:00:00.000Z "1: today" 0 0
-	mk_ref s-pin; mk_ref s-now
-	local out; out="$(run)"
-
-	assert_clean_run "$out"
-	assert_contains "$out" "* ancient pin" "the ancient pin is kept"
-	assert_eq "$(cache_field floor 3)" "2026-09-16T04:00:00.000Z" \
-		"an ancient PIN does not lower the watermark"
-	drop_store
-}
-
-t_retitled_old_session_is_rescued() {
-	# The documented way to pull an old session back into the batch by hand, and
-	# the reason the mtime prefilter is allowed to OVER-include. A retitle writes
-	# the file, so mtime jumps above the watermark while the last entry stays old.
-	# Anything that terminates the walk on a timestamp comparison against the
-	# watermark throws this session away again.
-	new_store
-	mk_tx s-ancient 2026-02-01T00:00:00.000Z "" 0 0
-	mk_tx s-recent 2026-09-16T04:00:00.000Z "1: today" 0 0
-	mk_ref s-ancient; mk_ref s-recent
+	mk_tx s-a 2026-09-10T00:00:00.000Z "" 0 0
+	mk_tx s-b 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-a "1: alpha"; mk_ref s-b "2: bravo"
 	run >/dev/null
-	assert_eq "$(cache_field floor 3)" "2026-09-16T04:00:00.000Z" "run 1 sets the watermark"
+	assert_eq "$(run_rc)" "0" "run 1 applies"
 
-	# Retitle it for real: content changes, mtime jumps to now, last entry stays old.
-	retitle_quietly s-ancient "5: rescued by hand" 2026-02-01T00:00:00.000Z
-	touch "$TH/.claude/projects/-proj-a/s-ancient.jsonl"
+	# A sidebar row whose transcript was last written long before run 1, and which
+	# no earlier run ever ruled on.
+	mk_tx s-17 2026-03-01T00:00:00.000Z "" 0 0
+	mk_ref s-17 "17: mux and serena"
 	local out; out="$(run)"
 
 	assert_clean_run "$out"
-	assert_contains "$out" "5: rescued by hand" \
-		"a retitled session below the watermark is still kept (walk does not stop at the floor)"
+	assert_contains "$(kept)" "17: mux and serena" \
+		"a numbered row with an old, untouched transcript is kept"
+	assert_contains "$(kept)" "1: alpha" "#1 is kept again with its transcript untouched"
+	assert_contains "$(kept)" "2: bravo" "#2 is kept again with its transcript untouched"
+	assert_eq "$(listing "$WS")" "local_s-17.json local_s-a.json local_s-b.json " \
+		"all three rows survive the second applied run"
 	drop_store
 }
 
-t_watermark_never_moves_backwards() {
-	# The watermark is the high-water mark of what has been SEEN, so it must never
-	# regress. A run whose newest candidate is older than the inherited watermark
-	# — here because the session that set it is gone and an ancient one was merely
-	# touched — must keep the inherited value, or the next run rescans the gap.
+t_no_cache_file() {
 	new_store
-	mk_tx s-old 2026-03-01T00:00:00.000Z "1: ancient" 0 0
-	mk_tx s-new 2026-09-16T04:00:00.000Z "2: recent" 0 0
-	mk_ref s-old; mk_ref s-new
+	mk_tx s-old 2026-03-01T00:00:00.000Z "" 0 0
+	mk_tx s-new 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-old "1: old transcript"; mk_ref s-new "2: new transcript"
+	# A cache file with a floor above every transcript and a keep row for a
+	# session that has no reference. Neither may affect the run.
+	printf 'version\t2\nfloor\t4102444800\t2100-01-01T00:00:00.000Z\nkeep\t3\ts-gone\t2026-01-01T00:00:00.000Z\t3: gone\n' \
+		>"$TH/.claude-prune-cache.tsv"
+	local before; before="$(cksum <"$TH/.claude-prune-cache.tsv")"
+	local out; out="$(run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(kept)" "1: old transcript" "a cache floor above every transcript filters nothing"
+	assert_contains "$(kept)" "2: new transcript" "the newer row is kept"
+	assert_not_contains "$out" "3: gone" "a cached keep row is not carried"
+	assert_eq "$(cksum <"$TH/.claude-prune-cache.tsv")" "$before" "the cache file is not written"
+
+	rm -f "$TH/.claude-prune-cache.tsv"
 	run >/dev/null
-	assert_eq "$(cache_field floor 3)" "2026-09-16T04:00:00.000Z" "run 1 sets the high-water mark"
-
-	# The session that set it disappears; the ancient one is merely touched.
-	rm -f "$TH/.claude/projects/-proj-a/s-new.jsonl" "$WS/local_s-new.json"
-	touch "$TH/.claude/projects/-proj-a/s-old.jsonl"
-	local out; out="$(run)"
-
-	assert_clean_run "$out"
-	assert_eq "$(cache_field floor 3)" "2026-09-16T04:00:00.000Z" \
-		"the watermark does NOT regress to an older last-entry"
+	assert_eq "$([ -e "$TH/.claude-prune-cache.tsv" ] && echo present || echo absent)" "absent" \
+		"an applied run creates no cache file"
 	drop_store
 }
 
-t_second_run_only_sees_what_changed() {
+t_numbering_first_seen_wins() {
 	new_store
-	local i
-	for i in 1 2 3 4 5 6 7 8; do
-		mk_tx "s-old-$i" "2026-09-0${i}T00:00:00.000Z" "$i: batch" 0 0
-		mk_ref "s-old-$i"
-	done
-	local out1; out1="$(run)"
-	assert_clean_run "$out1"
-	local floor1; floor1="$(cache_field floor 3)"
-	assert_eq "$floor1" "2026-09-08T00:00:00.000Z" "run 1 records the newest entry"
-
-	# One new session lands; the other eight are untouched.
-	mk_tx s-fresh 2026-09-20T00:00:00.000Z "1: brand new" 0 0
-	mk_ref s-fresh
-	local out; out="$(run)"
+	mk_tx s-old3 2026-09-10T00:00:00.000Z "" 0 0
+	mk_tx s-new3 2026-09-16T00:00:00.000Z "" 0 0
+	mk_tx s-star 2026-09-15T00:00:00.000Z "" 0 0
+	mk_tx s-plain 2026-09-14T00:00:00.000Z "" 0 0
+	mk_ref s-old3 "3: older three"
+	mk_ref s-new3 "3-1: newer three"
+	mk_ref s-star "  * leading space pin"
+	mk_ref s-plain "no number here"
+	local out; out="$(run --dry-run)"
 
 	assert_clean_run "$out"
-	assert_contains "$out" "watermark:  $floor1" "run 2 consults the watermark"
-	# Two, not one: the prefilter is mtime >= watermark, so the session that SET
-	# the watermark is admitted again alongside the new one. Over-inclusion is the
-	# design — it is what makes a retitle of an old session land — and two out of
-	# nine is the point.
-	assert_contains "$out" "candidates: 2 by mtime" \
-		"run 2 admits only the new transcript plus the watermark boundary one"
-	assert_contains "$out" "walked 2" "run 2 walks two sessions, not the store"
-	assert_no_shim_violation
+	assert_contains "$(kept)" "3-1: newer three" "the newest holder of a number wins"
+	assert_not_contains "$(kept)" "3: older three" "the older reuse of that number is not kept"
+	assert_contains "$(dropped)" "3: older three" "the older reuse is listed as dropped"
+	assert_contains "$(dropped)" "#3 is held by a newer session" "with the reason it lost"
+	assert_contains "$(kept)" "* leading space pin" "a pin survives leading whitespace"
+	assert_contains "$(dropped)" "no number here" "an unnumbered row is listed as dropped"
+	assert_contains "$(dropped)" "(unnumbered)" "with the reason it was dropped"
 	drop_store
 }
 
-t_keepers_carry_forward() {
+t_order_falls_back_to_reference() {
 	new_store
-	mk_tx s-1 2026-09-10T01:00:00.000Z "1: alpha" 0 0
-	mk_tx s-2 2026-09-10T02:00:00.000Z "2: bravo" 0 0
-	mk_tx s-3 2026-09-10T03:00:00.000Z "3: charlie" 0 0
-	# s-4 is the newest and so sets the watermark; the mtime >= boundary re-admits
-	# it on run 2, which leaves #2 and #3 as the ones that must CARRY.
-	mk_tx s-4 2026-09-10T04:00:00.000Z "4: delta" 0 0
-	mk_ref s-1; mk_ref s-2; mk_ref s-3; mk_ref s-4
-	run >/dev/null
-
-	# A newer #1 arrives; #2 and #3 are untouched and below the watermark.
-	mk_tx s-1b 2026-09-20T00:00:00.000Z "1: echo" 0 0
-	mk_ref s-1b
-	local out; out="$(run)"
+	mk_tx s-tx5 2026-09-10T00:00:00.000Z "" 0 0
+	mk_ref s-tx5 "5: has a transcript"
+	# No transcript at all; .lastActivityAt 1789862400000 is 2026-09-20T00:00:00Z
+	# in milliseconds, which is newer than the other #5's last entry.
+	mk_ref s-notx5 "5: no transcript yet" 1789862400000
+	local out; out="$(run --dry-run)"
 
 	assert_clean_run "$out"
-	assert_contains "$out" "carried:    2" "the two untouched numbered keepers carry forward"
-	assert_contains "$out" "1: echo" "the newer #1 wins its number"
-	assert_not_contains "$out" "1: alpha" "the older #1 loses its number"
-	assert_contains "$out" "2: bravo" "#2 survives without being re-read"
-	assert_contains "$out" "3: charlie" "#3 survives without being re-read"
+	assert_contains "$(kept)" "5: no transcript yet" \
+		"a row with no transcript is ordered by its reference's .lastActivityAt"
+	assert_contains "$(dropped)" "5: has a transcript" "the older #5 is dropped"
 	drop_store
 }
 
-t_pin_released_when_star_removed() {
+t_unreferenced_transcripts_are_ignored() {
 	new_store
-	mk_tx s-pin 2026-01-05T00:00:00.000Z "* keep me" 0 0
-	mk_tx s-now 2026-09-16T04:00:00.000Z "1: today" 0 0
-	mk_ref s-pin; mk_ref s-now
-	run >/dev/null
-	assert_contains "$(cat "$TH/.claude-prune-cache.tsv" 2>/dev/null)" "pin	s-pin" \
-		"the pin is cached"
-
-	# Unstar it WITHOUT bumping mtime, so only the pin re-check can notice.
-	retitle_quietly s-pin "keep me" 2026-01-05T00:00:00.000Z
-	local out; out="$(run)"
+	mk_tx s-orphan 2026-09-20T00:00:00.000Z "1: orphan transcript" 0 0
+	mk_tx s-ref 2026-09-10T00:00:00.000Z "" 0 0
+	mk_ref s-ref "1: referenced"
+	local out; out="$(run --dry-run)"
 
 	assert_clean_run "$out"
-	assert_contains "$out" "1 released" "an unstarred pin below the watermark is released"
-	assert_not_contains "$out" "keep me" "the released session is dropped from the keep set"
+	assert_contains "$(kept)" "1: referenced" "a transcript with no reference cannot claim a number"
+	assert_not_contains "$out" "orphan transcript" "a transcript with no reference is never reported"
 	drop_store
 }
 
-t_pin_kept_when_star_remains() {
+t_dry_run_lists_drops_and_unlinks_nothing() {
 	new_store
-	mk_tx s-pin 2026-01-05T00:00:00.000Z "* keep me" 0 0
-	mk_tx s-now 2026-09-16T04:00:00.000Z "1: today" 0 0
-	mk_ref s-pin; mk_ref s-now
-	run >/dev/null
-	local out; out="$(run)"
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"; mk_ref s-drop "scratch session"
+	local out; out="$(run --dry-run)"
 
 	assert_clean_run "$out"
-	assert_contains "$out" "1 re-checked and still starred" \
-		"a starred pin below the watermark is re-checked and kept"
-	assert_contains "$out" "* keep me" "the pin stays in the keep set"
-	assert_no_shim_violation
+	assert_contains "$(dropped)" "scratch session" "the dropped row is listed by title"
+	assert_contains "$out" "[dry run]" "the run stops as a dry run"
+	assert_eq "$(listing "$WS")" "local_s-drop.json local_s-keep.json " "--dry-run unlinks nothing"
 	drop_store
 }
 
 t_no_backups() {
 	new_store
-	mk_tx s-keep 2026-09-16T04:00:00.000Z "1: keep" 0 0
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
 	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
-	mk_ref s-keep; mk_ref s-drop
+	mk_ref s-keep "1: keep"; mk_ref s-drop ""
 
 	local dry; dry="$(run --dry-run)"
 	assert_contains "$dry" "deleted outright" "the plan says dropped references are deleted"
@@ -425,30 +383,27 @@ t_no_backups() {
 	assert_clean_run "$out"
 	local found; found="$(ls -d "$TH"/claude-deleted-session-refs-* 2>/dev/null | wc -l | tr -d ' ')"
 	assert_eq "$found" "0" "no backup directory is created"
-
-	run --no-backup >/dev/null 2>&1
-	assert_eq "$(run_rc)" "2" "--no-backup is gone and is rejected as an unknown option"
+	assert_eq "$(listing "$WS")" "local_s-keep.json " "the dropped reference is gone"
 	drop_store
 }
 
-t_v1_cache_is_ignored() {
+t_removed_options_are_rejected() {
 	new_store
-	mk_tx s-a 2026-09-16T04:00:00.000Z "1: a" 0 0
-	mk_ref s-a
-	# A v1 cache: a floor meaning "oldest kept", no version row, no keep rows.
-	printf 'floor\t1786503878\t2026-08-12T03:04:38.664Z\npin\ts-gone\n' \
-		>"$TH/.claude-prune-cache.tsv"
-	local out; out="$(run --dry-run)"
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"
 
-	assert_contains "$out" "watermark:  none" "a cache with no current version row is ignored"
+	run --no-backup >/dev/null 2>&1
+	assert_eq "$(run_rc)" "2" "--no-backup is rejected as an unknown option"
+	run --limit 5 >/dev/null 2>&1
+	assert_eq "$(run_rc)" "2" "--limit is rejected as an unknown option"
 	drop_store
 }
 
 t_transcripts_are_never_written() {
 	new_store
-	mk_tx s-keep 2026-09-16T04:00:00.000Z "1: keep" 0 0
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
 	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
-	mk_ref s-keep; mk_ref s-drop
+	mk_ref s-keep "1: keep"; mk_ref s-drop ""
 	local before after
 	before="$(cd "$TH/.claude/projects/-proj-a" && stat -f '%N %m %z' ./*.jsonl && cksum ./*.jsonl)"
 	local out; out="$(run)"
@@ -460,21 +415,19 @@ t_transcripts_are_never_written() {
 
 t_relink_shares_one_inode() {
 	new_store
-	mk_tx s-keep 2026-09-16T04:00:00.000Z "1: keep" 0 0
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
 	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
-	mk_ref s-keep 5; mk_ref s-drop 5
+	mk_ref s-keep "1: keep" 5; mk_ref s-drop "" 5
 	# The higher lastActivityAt wins, so WS2's copy is the inode the app is
 	# treated as writing to and the one every dir must end up pointing at.
-	mk_ref s-keep 9 "$WS2"
+	mk_ref s-keep "1: keep" 9 "$WS2"
 	local winner; winner="$(stat -f '%i' "$WS2/local_s-keep.json")"
 
 	local out; out="$(run)"
 	assert_clean_run "$out"
 
-	assert_eq "$(ls "$WS" | sort | tr '\n' ' ')" "local_s-keep.json " \
-		"the first dir holds exactly the keeper"
-	assert_eq "$(ls "$WS2" | sort | tr '\n' ' ')" "local_s-keep.json " \
-		"the second dir holds exactly the keeper"
+	assert_eq "$(listing "$WS")" "local_s-keep.json " "the first dir holds exactly the keeper"
+	assert_eq "$(listing "$WS2")" "local_s-keep.json " "the second dir holds exactly the keeper"
 	assert_eq "$(stat -f '%i' "$WS/local_s-keep.json")" \
 		"$(stat -f '%i' "$WS2/local_s-keep.json")" "both dirs point at ONE inode"
 	# Agreeing with each other is not enough: staging with cp mints a FRESH inode
@@ -485,41 +438,22 @@ t_relink_shares_one_inode() {
 	drop_store
 }
 
-t_numbering_first_seen_wins() {
-	new_store
-	mk_tx s-old3 2026-09-10T00:00:00.000Z "3: older three" 0 0
-	mk_tx s-new3 2026-09-16T00:00:00.000Z "3-1: newer three" 0 0
-	mk_tx s-star 2026-09-15T00:00:00.000Z "  * leading space pin" 0 0
-	mk_tx s-plain 2026-09-14T00:00:00.000Z "no number here" 0 0
-	mk_ref s-old3; mk_ref s-new3; mk_ref s-star; mk_ref s-plain
-	local out; out="$(run --dry-run)"
-
-	assert_clean_run "$out"
-	assert_contains "$out" "3-1: newer three" "the newest holder of a number wins"
-	assert_not_contains "$out" "3: older three" "the older reuse of that number is dropped"
-	assert_contains "$out" "* leading space pin" "a pin survives leading whitespace"
-	assert_not_contains "$out" "no number here" "an unnumbered session is dropped"
-	drop_store
-}
-
 # ---------------------------------------------------------------- runner
 
 TESTS="
 t_tail_only_reads
-t_title_beyond_window_is_not_found
-t_watermark_is_the_newest_entry
-t_old_pin_does_not_drag_the_watermark
-t_watermark_never_moves_backwards
-t_retitled_old_session_is_rescued
-t_second_run_only_sees_what_changed
-t_keepers_carry_forward
-t_pin_released_when_star_removed
-t_pin_kept_when_star_remains
+t_reference_title_wins
+t_title_beyond_window_is_kept
+t_untouched_session_is_decided_every_run
+t_no_cache_file
+t_numbering_first_seen_wins
+t_order_falls_back_to_reference
+t_unreferenced_transcripts_are_ignored
+t_dry_run_lists_drops_and_unlinks_nothing
 t_no_backups
-t_v1_cache_is_ignored
+t_removed_options_are_rejected
 t_transcripts_are_never_written
 t_relink_shares_one_inode
-t_numbering_first_seen_wins
 "
 
 for t in $TESTS; do

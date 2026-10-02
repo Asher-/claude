@@ -3,25 +3,33 @@
 # prune-claude-sessions.sh — collapse the Claude Desktop sidebar to the most recent
 # batch of NUMBERED sessions plus every PINNED one.
 #
-# THE TRANSCRIPT IS THE AUTHORITY
-#   A session IS its transcript:
-#     ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
-#   The current title is the LAST "custom-title" line in it, and how recent the
-#   session is comes from the LAST "timestamp" in it. Transcripts are READ ONLY —
-#   this script never writes one, ever.
-#
+# EVERY SIDEBAR ROW IS DECIDED, EVERY RUN
 #   The sidebar entries are local_*.json under
 #     claude-code-sessions/<account>/<workspace>/
-#   They are ~630-byte REFERENCES to a transcript, joined by .cliSessionId. They
-#   are derived artifacts: this script unlinks and re-links them freely, and
+#   They are ~630-byte REFERENCES to a transcript, joined by .cliSessionId:
+#     ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
+#   They are derived artifacts: this script unlinks and re-links them freely, and
 #   deleting one removes a sidebar row without touching the conversation.
+#   Transcripts are READ ONLY — this script never writes one, ever.
 #
-#   Reading recency from the references was the first bug. A reference is a
-#   per-account copy: the same session can exist in two workspace dirs as two
-#   inodes whose .title and .lastActivityAt have drifted apart, so "most recent"
-#   computed from them is whichever copy you happened to look at.
+#   Each run reads every reference and rules on each one from scratch. Nothing
+#   is carried between runs, so there is no saved state for a session to fall
+#   out of. The references are a few dozen small files and each costs one tail
+#   read of its transcript, so there is nothing to save by skipping any.
 #
-# WHY NOT FILE MTIME
+#   Skipping them is how a session was lost. A version that walked the transcript
+#   store kept a watermark and a cached keep set so it could ignore transcripts
+#   older than its last run, and read each title from the transcript's tail. On
+#   2026-10-02 it dropped a session the sidebar showed as "17: ...": either its
+#   transcript sat below the watermark with no cached row to carry it, or its
+#   title sat outside the tail window. Both routes are gone.
+#
+# THE TITLE IS THE REFERENCE'S .title
+#   That is the title the sidebar shows and the one you edit, so the number and
+#   pin are read from it, whole. Only a reference with no .title falls back to
+#   the last custom-title in its transcript's tail.
+#
+# ORDER IS THE TRANSCRIPT'S LAST ENTRY, NEVER FILE MTIME
 #   mtime is when the file was last WRITTEN, which includes the app merely
 #   opening a session to display it. Opening the app to check the sidebar after
 #   a run therefore bumped old sessions above new ones, and the next run handed
@@ -30,40 +38,26 @@
 #   than every session in the live batch while its last entry was six hours old.
 #
 #   The last entry's own timestamp cannot move except by a new entry. That is
-#   the ordering key. mtime survives only as the PREFILTER (see THE WATERMARK).
+#   the ordering key. A session whose transcript has no timestamp falls back to
+#   its reference's .lastActivityAt.
+#
+#   Reading recency from the references alone was the first bug. A reference is
+#   a per-account copy: the same session could exist in two workspace dirs as
+#   two inodes whose .lastActivityAt had drifted apart, so "most recent" computed
+#   from them was whichever copy you happened to look at.
 #
 # NEVER READ A WHOLE TRANSCRIPT
-#   Both fields this script needs — the last timestamp and the last custom-title
-#   — live at the END of the file, and ONE 256K tail read per transcript gets
-#   both out of the same buffer. Transcripts run to 16MB; the store is 9.5GB.
+#   The last timestamp lives at the END of the file, and ONE 256K tail read per
+#   transcript gets it, together with the fallback title, out of the same buffer.
+#   Transcripts run to 16MB; the store is 9.5GB.
 #
-#   Measured 2026-09-16 over a 400-transcript sample: 258 carry a custom-title
-#   and the last one sits at most 32.0KB from EOF (p50 12.1KB, p99 31.6KB); 142
-#   carry none anywhere, so no window size would find one. 256K is 8x the
-#   observed worst case. If Claude ever starts writing a custom-title and then
-#   appending more than 256K without rewriting it, re-measure and widen this.
+#   The window is also why the title is not read from the transcript first: a
+#   custom-title is written when the session is renamed, and anything the
+#   session writes afterwards pushes it back toward and past the window's edge.
 #
 #   An earlier version read every candidate WHOLE, with a grep+tail+jq fork per
-#   session, to reach a title that was never more than 32KB from the end: 33ms
-#   per session against 0.35ms for the tail read, 94x, and it dominated the run.
-#
-# NEVER READ ALL THE SESSIONS — THE WATERMARK
-#   The cache's floor is a WATERMARK: the newest last-entry timestamp this run
-#   saw. The next run prefilters to transcripts with mtime >= that, which is
-#   exactly what has been written or touched since. Everything older is already
-#   settled and is carried forward from the cache rather than re-derived.
-#
-#   The floor is NOT the oldest kept session. That was the second bug: pins are
-#   deliberately old and pins are keepers, so the floor sank to the oldest pin
-#   and every run re-walked from there to now — 3660 sessions and two minutes,
-#   every time, to discover a handful of new ones. A floor that chases the
-#   bottom of the keep set can never advance.
-#
-#   mtime is an UPPER BOUND on real activity: writing an entry sets it, and any
-#   later touch only raises it. So "mtime >= watermark" over-includes and can
-#   never under-include — sound as a prefilter, and a prefilter is all it is.
-#   Over-inclusion is why a RETITLE still lands: retitling writes the file, so
-#   the session reappears in the candidate set however old its last entry is.
+#   session: 33ms per session against 0.35ms for the tail read, 94x, and it
+#   dominated the run.
 #
 # HOW A SESSION NUMBER IS READ
 #   The LEADING RUN OF DIGITS of the title, whatever follows it. Not "N:" — just
@@ -76,11 +70,9 @@
 #   Anything else is unnumbered and is never kept.
 #
 # THE WALK
-#   Every candidate, newest-first BY LAST ENTRY. The prefilter already bounds the
-#   set to what has changed, so the walk does not stop early — there is nothing
-#   below it to stop before.
+#   Every session that has a reference, newest-first BY LAST ENTRY:
 #
-#     - a leading '*'  -> keep, and record as a pin
+#     - a leading '*'  -> keep
 #     - a number seen for the FIRST time -> keep
 #     - a number already seen -> an older batch's reuse of it, drop
 #     - anything else -> drop
@@ -88,18 +80,8 @@
 #   Numbering restarts per batch and the walk is newest-first, so first-seen wins
 #   and the older batch's #3 loses to the current #3 without any extra machinery.
 #
-#   With no cache (first run, or a deleted one) every transcript is a candidate,
-#   so --limit bounds the walk: it stops once that many distinct numbers are kept.
-#
-#   CARRY-FORWARD. The keep set is the merge of this run's keepers with the
-#   cached ones. A cached keeper is dropped only when this run has something
-#   better: its number was re-claimed by a newer session, or its own transcript
-#   was re-read this run and no longer earns a slot (retitled, unstarred).
-#
-#   PINS ARE RE-CHECKED, NOT RE-WALKED. A pin whose transcript did not change is
-#   not a candidate, so the cache carries the pin list forward and every cached
-#   pin is re-read from its tail each run: still '*' -> kept, retitled -> dropped.
-#   That check is the ONLY thing this script looks at below the watermark.
+#   Every dropped row is printed with its reason before anything is unlinked, and
+#   --dry-run stops there.
 #
 # THE RELINK
 #   One inode per session, hardlinked into every workspace dir. That is the whole
@@ -131,14 +113,11 @@ shopt -s nullglob
 
 APP="$HOME/Library/Application Support/Claude/claude-code-sessions"
 PROJECTS="$HOME/.claude/projects"
-CACHE="$HOME/.claude-prune-cache.tsv"
-CACHE_VERSION=2
-LIMIT=20
 APPLY=1
 DIR=""
 
-# One tail read per transcript serves both the timestamp and the title. See
-# NEVER READ A WHOLE TRANSCRIPT for the measurement behind the size.
+# One tail read per transcript serves both the timestamp and the fallback title.
+# See NEVER READ A WHOLE TRANSCRIPT.
 TAIL_WINDOW=262144
 
 usage() {
@@ -150,36 +129,29 @@ Usage:
   prune-claude-sessions.sh --dry-run        show the plan, write nothing
 
 Options:
-  -n, --limit N    cap on how many distinct numbers may be kept (default 20).
-                   Only bounds the walk when there is no cached watermark.
       --dir PATH   explicit <account>/<workspace> dir. The store root is
                    PATH/../.., and the relink covers every dir under it.
       --dry-run    print the plan and write nothing
   -h, --help       show this text
 
-A session's number is the LEADING RUN OF DIGITS of its title, whatever follows:
-"7:", "7-1:" and "7*:" are all session 7. A leading '*' pins a session, which
-keeps it regardless of number or how far back it sits.
+A session's number is the LEADING RUN OF DIGITS of its sidebar title, whatever
+follows: "7:", "7-1:" and "7*:" are all session 7. A leading '*' pins a session,
+which keeps it regardless of number or how far back it sits.
 
+Every sidebar row is decided on every run; nothing is cached between runs.
 Order comes from the last entry INSIDE each transcript, never from file mtime —
 opening a session in the app bumps its mtime and would otherwise hand its number
 back to an older batch. Transcripts under ~/.claude/projects/ are never written,
 and only their last 256K is ever read.
 
-Each run records a watermark: the newest last-entry it saw. The next run looks
-only at transcripts written since, plus a re-read of every cached pin to catch a
-star that was removed. Dropped sidebar references are deleted, not backed up —
-they are pointers, and the conversation they point at is untouched.
+Every dropped row is listed with its reason. Dropped sidebar references are
+deleted, not backed up — they are pointers, and the conversation they point at
+is untouched.
 EOF
 }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	-n | --limit)
-		[ $# -ge 2 ] || { echo "error: $1 needs a number" >&2; exit 2; }
-		LIMIT="$2"
-		shift 2
-		;;
 	--dir)
 		[ $# -ge 2 ] || { echo "error: $1 needs a path" >&2; exit 2; }
 		DIR="${2%/}"
@@ -190,10 +162,6 @@ while [ $# -gt 0 ]; do
 	*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
 	esac
 done
-
-case "$LIMIT" in
-'' | *[!0-9]*) echo "error: --limit must be a non-negative integer, got '$LIMIT'" >&2; exit 2 ;;
-esac
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq not found" >&2; exit 1; }
 command -v perl >/dev/null 2>&1 || { echo "error: perl not found" >&2; exit 1; }
@@ -224,9 +192,12 @@ STORE="$(cd "$DIR/../.." && pwd)"
 
 # ------------------------------------------------- index the references
 #
-# cliSessionId \t lastActivityAt \t path, for every reference in every dir under
-# the store. A session present in several dirs yields several rows; the highest
-# lastActivityAt wins, and that inode becomes the one shared by all dirs.
+# cliSessionId \t lastActivityAt \t path \t title \t lastActivityAt as ISO-8601,
+# for every reference in every dir under the store. A session present in several
+# dirs yields several rows; the highest lastActivityAt wins, and that inode
+# becomes the one shared by all dirs. The ISO column is the ordering fallback for
+# a session whose transcript has no timestamp; a numeric .lastActivityAt above
+# 1e11 is read as milliseconds.
 
 refs=()
 for ws in "$STORE"/*/*/; do
@@ -236,44 +207,19 @@ done
 [ ${#refs[@]} -gt 0 ] || { echo "error: no local_*.json anywhere under $STORE" >&2; exit 1; }
 
 printf '%s\0' "${refs[@]}" |
-	xargs -0 jq -r '[ (.cliSessionId // ""), (.lastActivityAt // 0), input_filename ] | @tsv' \
-		>"$TMP/refs.all"
+	xargs -0 jq -r '
+		(.lastActivityAt // 0) as $l
+		| [ (.cliSessionId // ""), $l, input_filename, (.title // ""),
+		    (if ($l | type) == "number"
+		     then (if $l > 100000000000 then $l / 1000 else $l end | floor | todate)
+		     else ($l | tostring) end) ]
+		| @tsv' >"$TMP/refs.all"
 
 sort -t"$TAB" -k1,1 -k2,2nr "$TMP/refs.all" |
 	awk -F'\t' '$1 != "" && $1 != prev { print; prev = $1 }' >"$TMP/refs.best"
 
 n_refs=${#refs[@]}
 n_sessions=$(wc -l <"$TMP/refs.best" | tr -d ' ')
-
-# ------------------------------------------------------------ read the cache
-#
-#   version <TAB> 2
-#   floor   <TAB> <epoch-seconds> <TAB> <iso8601-utc, trailing Z>
-#   pin     <TAB> <cliSessionId>
-#   keep    <TAB> <number> <TAB> <cliSessionId> <TAB> <iso8601> <TAB> <title>
-#
-# The version row gates the whole file. A v1 cache recorded a floor meaning
-# "oldest kept session" and carried no keep set, so its floor is not commensurable
-# with this one and there is nothing to carry forward: it is ignored wholesale and
-# this run rebuilds from a full scan.
-
-FLOOR_EPOCH=0
-FLOOR_ISO=""
-: >"$TMP/pins.cached"
-: >"$TMP/keep.cached"
-if [ -f "$CACHE" ]; then
-	cache_version=$(awk -F'\t' '$1 == "version" { print $2; exit }' "$CACHE")
-	if [ "${cache_version:-0}" = "$CACHE_VERSION" ]; then
-		FLOOR_EPOCH=$(awk -F'\t' '$1 == "floor" { print $2; exit }' "$CACHE")
-		FLOOR_ISO=$(awk -F'\t' '$1 == "floor" { print $3; exit }' "$CACHE")
-		case "$FLOOR_EPOCH" in '' | *[!0-9]*) FLOOR_EPOCH=0 ;; esac
-		case "$FLOOR_ISO" in *Z) ;; *) FLOOR_EPOCH=0; FLOOR_ISO="" ;; esac
-		awk -F'\t' '$1 == "pin" && $2 != "" { print $2 }' "$CACHE" | sort -u >"$TMP/pins.cached"
-		awk -F'\t' -v OFS='\t' '$1 == "keep" && $3 != "" { print $2, $3, $4, $5 }' "$CACHE" \
-			>"$TMP/keep.cached"
-	fi
-fi
-n_pins_cached=$(wc -l <"$TMP/pins.cached" | tr -d ' ')
 
 # ------------------------------------------ the tail reader: timestamp + title
 #
@@ -288,9 +234,7 @@ n_pins_cached=$(wc -l <"$TMP/pins.cached" | tr -d ' ')
 # The timestamp keeps a whole-file fallback: a transcript whose final entry is a
 # single line longer than the window has no timestamp inside it, and that is the
 # one case the tail genuinely cannot answer. The title has no such fallback by
-# design — a session with no custom-title anywhere is the common case (142 of 400
-# sampled), and falling back would read every one of those entirely to find
-# nothing.
+# design — it is only the fallback for a reference with no .title of its own.
 
 stamp_titles() { # $1=path-list file  $2=output file
 	perl -e '
@@ -338,65 +282,55 @@ stamp_titles() { # $1=path-list file  $2=output file
 		' >"$2"
 }
 
-# ---------------------------------------- phase 1: candidates by the watermark
+# ---------------------------------------- each referenced session's last entry
+#
+# One glob of the transcript store maps cliSessionId -> path; only the
+# transcripts of sessions that have a reference are then read.
 
 transcripts=("$PROJECTS"/*/*.jsonl)
 [ ${#transcripts[@]} -gt 0 ] || { echo "error: no transcripts under $PROJECTS" >&2; exit 1; }
 
-printf '%s\0' "${transcripts[@]}" | xargs -0 stat -f "%m${TAB}%N" >"$TMP/tx.bymtime"
+printf '%s\n' "${transcripts[@]}" |
+	awk -F'\t' -v OFS='\t' '{ n = split($0, seg, "/"); b = seg[n]; sub(/\.jsonl$/, "", b); print b, $0 }' |
+	sort -u -t"$TAB" -k1,1 >"$TMP/cli2path"
 
-if [ "$FLOOR_EPOCH" -gt 0 ]; then
-	awk -F'\t' -v f="$FLOOR_EPOCH" '$1 >= f { print $2 }' "$TMP/tx.bymtime" >"$TMP/candidates"
-else
-	cut -f2 "$TMP/tx.bymtime" >"$TMP/candidates"
-fi
-n_cand=$(wc -l <"$TMP/candidates" | tr -d ' ')
+awk -F'\t' 'FILENAME == ARGV[1] { path[$1] = $2; next } ($1 in path) { print path[$1] }' \
+	"$TMP/cli2path" "$TMP/refs.best" >"$TMP/tx.list"
 
-# --------------------------------- phase 2: the real last-entry time and title
+stamp_titles "$TMP/tx.list" "$TMP/tx.stamped"
 
-stamp_titles "$TMP/candidates" "$TMP/tx.stamped"
+# ------------------------------------------------------------ the session rows
+#
+# order-key \t cliSessionId \t reference path \t title, newest first. The key is
+# the transcript's last entry, else the reference's .lastActivityAt; the title is
+# the reference's .title, else the transcript's last custom-title. ISO-8601 sorts
+# lexicographically exactly as it sorts chronologically.
 
-# ISO-8601 sorts lexicographically exactly as it sorts chronologically.
-sort -r "$TMP/tx.stamped" >"$TMP/tx.sorted"
-n_stamped=$(wc -l <"$TMP/tx.sorted" | tr -d ' ')
-n_nostamp=$((n_cand - n_stamped))
-
-# The new watermark is the newest last-entry seen, which is the first row. It
-# never moves backwards: a run that saw nothing keeps the one it inherited.
-WATERMARK_ISO="$FLOOR_ISO"
-if [ "$n_stamped" -gt 0 ]; then
-	top_iso=$(head -1 "$TMP/tx.sorted" | cut -f1)
-	if [ -z "$WATERMARK_ISO" ] || [[ "$top_iso" > "$WATERMARK_ISO" ]]; then
-		WATERMARK_ISO="$top_iso"
-	fi
-fi
+awk -F'\t' -v OFS='\t' '
+	FILENAME == ARGV[1] {
+		n = split($2, seg, "/"); b = seg[n]; sub(/\.jsonl$/, "", b)
+		ts[b] = $1; tt[b] = $3
+		next
+	}
+	{
+		key = ($1 in ts) ? ts[$1] : $5
+		title = ($4 != "") ? $4 : (($1 in tt) ? tt[$1] : "")
+		print key, $1, $3, title
+	}
+' "$TMP/tx.stamped" "$TMP/refs.best" | sort -t"$TAB" -k1,1r >"$TMP/sessions"
 
 # ------------------------------------------------------------------ the walk
 #
-# keep rows: number-or-* \t cliSessionId \t iso \t title
+# stage rows:   reference path \t number-or-* \t title
+# dropped rows: reason \t title
 
-: >"$TMP/keep"
-: >"$TMP/pins.fresh"
-: >"$TMP/seen.cli"
+: >"$TMP/stage"
+: >"$TMP/dropped"
 
 seen=" "
-nseen=0
-walked=0
-reason="walked every candidate"
 
-while IFS="$TAB" read -r ts path title; do
+while IFS="$TAB" read -r key cli path title; do
 	[ -n "$path" ] || continue
-
-	if [ -z "$FLOOR_ISO" ] && [ "$nseen" -ge "$LIMIT" ]; then
-		reason="no cached watermark; stopped at the --limit of $LIMIT distinct number(s)"
-		break
-	fi
-
-	walked=$((walked + 1))
-
-	cli="${path##*/}"
-	cli="${cli%.jsonl}"
-	printf '%s\n' "$cli" >>"$TMP/seen.cli"
 
 	# Strip leading whitespace without forking: chop the run of blanks that
 	# precedes the first non-blank.
@@ -404,118 +338,30 @@ while IFS="$TAB" read -r ts path title; do
 
 	case "$trimmed" in
 	\**)
-		printf '%s\t%s\t%s\t%s\n' "*" "$cli" "$ts" "$title" >>"$TMP/keep"
-		printf '%s\n' "$cli" >>"$TMP/pins.fresh"
+		printf '%s\t%s\t%s\n' "$path" "*" "$title" >>"$TMP/stage"
 		continue
 		;;
 	esac
 
 	cand="${trimmed%%[!0-9]*}"
-	[ -n "$cand" ] || continue
+	if [ -z "$cand" ]; then
+		printf '%s\t%s\n' "unnumbered" "${title:-(untitled)}" >>"$TMP/dropped"
+		continue
+	fi
 	num=$((10#$cand))
 
 	case "$seen" in
-	*" $num "*) continue ;;
+	*" $num "*)
+		printf '%s\t%s\n' "#$num is held by a newer session" "$title" >>"$TMP/dropped"
+		continue
+		;;
 	esac
 	seen="$seen$num "
-	nseen=$((nseen + 1))
-	printf '%s\t%s\t%s\t%s\n' "$num" "$cli" "$ts" "$title" >>"$TMP/keep"
-done <"$TMP/tx.sorted"
-
-sort -u "$TMP/seen.cli" >"$TMP/seen.cli.u"
-
-# -------------------------------------------------- carry the cached keep set
-#
-# A cached numbered keeper survives unless this run has something better for it:
-# its number was re-claimed by a newer session, or its own transcript was re-read
-# this run — in which case the walk above has already ruled on it, and that ruling
-# is the answer, not the stale cache row.
-
-: >"$TMP/keep.carried"
-if [ -s "$TMP/keep.cached" ]; then
-	cut -f1 "$TMP/keep" | sort -u >"$TMP/keep.nums"
-	awk -F'\t' '
-		FILENAME == ARGV[1] { seencli[$0] = 1; next }
-		FILENAME == ARGV[2] { claimed[$0] = 1; next }
-		$1 == "*"       { next }
-		($2 in seencli) { next }
-		($1 in claimed) { next }
-		{ print }
-	' "$TMP/seen.cli.u" "$TMP/keep.nums" "$TMP/keep.cached" >"$TMP/keep.carried"
-	cat "$TMP/keep.carried" >>"$TMP/keep"
-fi
-n_carried=$(wc -l <"$TMP/keep.carried" | tr -d ' ')
-
-# -------------------------------------------------- re-check the cached pins
-#
-# The only thing this script reads below the watermark. A pin whose transcript was
-# rewritten is already a candidate and the walk has ruled on it; the rest are
-# re-read here, from their tails, purely to notice a star that was taken away.
-
-n_pin_kept=0
-n_pin_released=0
-if [ "$n_pins_cached" -gt 0 ]; then
-	# cliSessionId -> transcript path, built once from the paths already in hand,
-	# so a pin never costs a glob across every project directory.
-	awk -F'\t' -v OFS='\t' '{
-		p = $2; n = split(p, seg, "/"); b = seg[n]; sub(/\.jsonl$/, "", b); print b, p
-	}' "$TMP/tx.bymtime" | sort -u -t"$TAB" -k1,1 >"$TMP/cli2path"
-
-	: >"$TMP/pins.recheck"
-	: >"$TMP/pins.gone"
-	awk -F'\t' -v RECHECK="$TMP/pins.recheck" -v GONE="$TMP/pins.gone" '
-		FILENAME == ARGV[1] { seencli[$0] = 1; next }
-		FILENAME == ARGV[2] { path[$1] = $2; next }
-		($0 in seencli) { next }
-		($0 in path)    { print path[$0] > RECHECK; next }
-		{ print > GONE }
-	' "$TMP/seen.cli.u" "$TMP/cli2path" "$TMP/pins.cached"
-
-	n_pin_released=$(wc -l <"$TMP/pins.gone" | tr -d ' ')
-
-	if [ -s "$TMP/pins.recheck" ]; then
-		stamp_titles "$TMP/pins.recheck" "$TMP/pins.stamped"
-		while IFS="$TAB" read -r ts path title; do
-			[ -n "$path" ] || continue
-			cli="${path##*/}"
-			cli="${cli%.jsonl}"
-			trimmed="${title#"${title%%[![:space:]]*}"}"
-			case "$trimmed" in
-			\**)
-				printf '%s\t%s\t%s\t%s\n' "*" "$cli" "$ts" "$title" >>"$TMP/keep"
-				printf '%s\n' "$cli" >>"$TMP/pins.fresh"
-				n_pin_kept=$((n_pin_kept + 1))
-				;;
-			*) n_pin_released=$((n_pin_released + 1)) ;;
-			esac
-		done <"$TMP/pins.stamped"
-	fi
-fi
-
-# Newest first, so the report reads the way the walk ran.
-sort -t"$TAB" -k3,3r "$TMP/keep" >"$TMP/keep.sorted"
-mv "$TMP/keep.sorted" "$TMP/keep"
-
-# ------------------------------------------- resolve keepers to reference files
-#
-# A transcript outlives its reference, so the keep set can name a session with no
-# sidebar row left to link. One pass over both files — refs.best is already one
-# row per session, keyed by cliSessionId.
-
-: >"$TMP/stage"
-: >"$TMP/orphans"
-# STAGE/ORPHANS go through -v, never as `VAR=value` operands: an operand
-# assignment occupies an ARGV slot, which would shift every file one place and
-# make `FILENAME == ARGV[1]` match nothing.
-awk -F'\t' -v OFS='\t' -v STAGE="$TMP/stage" -v ORPHANS="$TMP/orphans" '
-	FILENAME == ARGV[1] { if (!($1 in ref)) ref[$1] = $3; next }
-	($2 in ref) { print ref[$2], $1, $4 > STAGE; next }
-	{ print $2, $1, $4 > ORPHANS }
-' "$TMP/refs.best" "$TMP/keep"
+	printf '%s\t%s\t%s\n' "$path" "$num" "$title" >>"$TMP/stage"
+done <"$TMP/sessions"
 
 n_keep=$(wc -l <"$TMP/stage" | tr -d ' ')
-n_orphan=$(wc -l <"$TMP/orphans" | tr -d ' ')
-n_drop=$((n_sessions - n_keep))
+n_drop=$(wc -l <"$TMP/dropped" | tr -d ' ')
 
 targets=()
 for ws in "$STORE"/*/*/; do
@@ -525,17 +371,6 @@ done
 
 echo "store:      $STORE"
 echo "sessions:   $n_sessions distinct   ($n_refs reference file(s) across ${#targets[@]} dir(s))"
-if [ -n "$FLOOR_ISO" ]; then
-	echo "watermark:  $FLOOR_ISO   (only transcripts written since are candidates)"
-else
-	echo "watermark:  none — full scan bounded by --limit $LIMIT"
-fi
-echo "candidates: $n_cand by mtime, $n_stamped stamped, walked $walked   ($reason)"
-[ "$n_nostamp" -eq 0 ] || echo "            ($n_nostamp transcript(s) carried no timestamp and were skipped)"
-[ "$n_carried" -eq 0 ] || echo "carried:    $n_carried numbered keeper(s) forward from the cache unchanged"
-if [ "$n_pins_cached" -gt 0 ]; then
-	echo "pins:       $n_pin_kept re-checked and still starred, $n_pin_released released"
-fi
 echo "keeping:    $n_keep   dropping: $n_drop"
 echo
 
@@ -545,12 +380,11 @@ while IFS="$TAB" read -r path num title; do
 done <"$TMP/stage"
 echo
 
-if [ "$n_orphan" -gt 0 ]; then
-	echo "no sidebar reference exists for $n_orphan kept session(s):"
-	while IFS="$TAB" read -r cli num title; do
-		printf '  #%-4s %s  (%s)\n' "$num" "${title:0:50}" "$cli"
-	done <"$TMP/orphans"
-	echo "  (the transcript is intact; only the sidebar row is missing)"
+if [ "$n_drop" -gt 0 ]; then
+	echo "dropping:"
+	while IFS="$TAB" read -r why title; do
+		printf '  %-66s  (%s)\n' "${title:0:66}" "$why"
+	done <"$TMP/dropped"
 	echo
 fi
 
@@ -618,28 +452,4 @@ for ws in "${targets[@]}"; do
 done
 
 echo "Relinked $rebuilt dir(s) to $nk keeper(s) each, one inode per session."
-
-# ------------------------------------------------------------- write the cache
-
-WATERMARK_EPOCH=0
-if [ -n "$WATERMARK_ISO" ]; then
-	WATERMARK_EPOCH=$(TZ=UTC date -jf '%Y-%m-%dT%H:%M:%S' "${WATERMARK_ISO%.*}" '+%s' 2>/dev/null || echo 0)
-fi
-
-if [ "$WATERMARK_EPOCH" -gt 0 ]; then
-	{
-		printf 'version\t%s\n' "$CACHE_VERSION"
-		printf 'floor\t%s\t%s\n' "$WATERMARK_EPOCH" "$WATERMARK_ISO"
-		sort -u "$TMP/pins.fresh" | while IFS= read -r c; do
-			[ -n "$c" ] && printf 'pin\t%s\n' "$c"
-		done
-		awk -F'\t' -v OFS='\t' '$1 != "*" { print "keep", $1, $2, $3, $4 }' "$TMP/keep"
-	} >"$CACHE.tmp.$$" && mv "$CACHE.tmp.$$" "$CACHE" || rm -f "$CACHE.tmp.$$"
-	n_pins_now=$(sort -u "$TMP/pins.fresh" | grep -c . || true)
-	n_keep_rows=$(awk -F'\t' '$1 != "*"' "$TMP/keep" | grep -c . || true)
-	echo "Cache: watermark $WATERMARK_ISO, $n_pins_now pin(s), $n_keep_rows numbered keeper(s)   ($CACHE)"
-else
-	echo "warn: could not derive a watermark timestamp; cache left unchanged" >&2
-fi
-
 echo "Restart the Claude app if the sidebar doesn't refresh."
