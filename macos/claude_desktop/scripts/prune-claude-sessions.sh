@@ -32,9 +32,28 @@
 #   the last custom-title in its transcript's tail.
 #
 #   A session whose copies in different workspace dirs carry different titles
-#   shows a different title in each sidebar, so no one copy speaks for it. Every
-#   copy is read, and the session is kept if any copy would keep it: a pinned
-#   copy, or a numbered copy whose number no newer session holds.
+#   shows a different title in each sidebar. Every copy is read, and the copies
+#   written last speak for the session; see THE NEWEST WRITE DECIDES.
+#
+# THE NEWEST WRITE DECIDES
+#   The app replaces a reference with a new inode when it writes one, so
+#   retitling a session in one sidebar rewrites that sidebar's copy only. Every
+#   other dir keeps the old inode and the old title. If any copy could keep the
+#   session, an old copy would keep it on a '*' or a number since removed, and
+#   the relink would put that title back in every dir: neither could ever be
+#   removed.
+#
+#   So a session is decided by the copies written at its newest file mtime, and
+#   is kept if any of them would keep it. An older copy keeps nothing, and if the
+#   session is dropped its title is listed as retitled by a newer write. The app
+#   writes a reference when its session is focused or active, so the newest copy
+#   is the one in the account in use, showing the title as last edited.
+#   Measured 2026-10-03: in 11 of 56 sessions the active account's dir held a
+#   copy of its own, mtime matching its .lastFocusedAt or .lastActivityAt,
+#   beside an older inode the other 16 dirs shared.
+#
+#   mtime compares the copies of ONE session and nothing else. It never orders
+#   sessions — see ORDER IS THE TRANSCRIPT'S LAST ENTRY.
 #
 # ORDER IS THE TRANSCRIPT'S LAST ENTRY, NEVER FILE MTIME
 #   mtime is when the file was last WRITTEN, which includes the app merely
@@ -77,17 +96,17 @@
 #   Anything else is unnumbered and is never kept.
 #
 # THE WALK
-#   Every session that has a reference, newest-first BY LAST ENTRY, trying its
-#   copies pinned first, then numbered, newest copy first within each, until one
-#   keeps it:
+#   Every session that has a reference, newest-first BY LAST ENTRY, trying the
+#   copies written at its newest mtime pinned first, then numbered, highest
+#   .lastActivityAt first within each, until one keeps it:
 #
 #     - a leading '*'  -> keep
 #     - a number seen for the FIRST time -> keep
 #     - a number already seen -> an older batch's reuse of it, try the next copy
 #     - anything else -> try the next copy
 #
-#   A session no copy keeps is dropped, and listed under every distinct title
-#   its copies carry.
+#   An older copy keeps nothing. A session no copy keeps is dropped, and listed
+#   under every distinct title its copies carry.
 #
 #   Numbering restarts per batch and the walk is newest-first, so first-seen wins
 #   and the older batch's #3 loses to the current #3 without any extra machinery.
@@ -96,18 +115,20 @@
 #   --dry-run stops there.
 #
 # THE RELINK
-#   One inode per session, hardlinked into every workspace dir. That is the whole
-#   point of the layout: the app writes a reference in place, and one write is
-#   then visible in every account.
+#   One inode per session, hardlinked into every workspace dir, so after a run
+#   every account shows the same title. The app's next write of a reference
+#   replaces that dir's copy with a new inode, and the run after carries it to
+#   every dir again; see THE NEWEST WRITE DECIDES.
 #
 #   So keepers are staged with ln, NEVER cp. Staging with cp mints a fresh inode
 #   and silently orphans the one the app is writing to — which is how the store
 #   ended up holding two divergent copies of twelve sessions under one basename.
 #   If a keeper exists in several dirs as several inodes, the copy that kept it
-#   becomes the single inode for all of them. Among copies whose titles keep it
-#   alike, that is the one with the greatest .lastActivityAt. Where the copies'
-#   titles differ, it is the pinned or numbered copy, so the relink never puts an
-#   unnumbered title into a sidebar that showed the session numbered or pinned.
+#   becomes the single inode for all of them. That copy was written at the
+#   session's newest mtime. Among such copies whose titles keep it alike, it is
+#   the one with the greatest .lastActivityAt. Where their titles differ, it is
+#   the pinned or numbered copy, so the relink never puts an unnumbered title
+#   into a sidebar that showed the session numbered or pinned.
 #
 #   DROPPED REFERENCES ARE NOT BACKED UP. They are ~630-byte pointers and the
 #   transcript they point at is untouched, so a dropped row costs a sidebar entry
@@ -121,7 +142,8 @@
 #
 #   Leaving the Claude app open is fine. Restart it if the sidebar doesn't refresh.
 #
-# Written for stock macOS /bin/bash (3.2), /usr/bin/jq and /usr/bin/perl.
+# Written for stock macOS /bin/bash (3.2), /usr/bin/jq, /usr/bin/perl and
+# /usr/bin/stat.
 
 set -euo pipefail
 shopt -s nullglob
@@ -151,7 +173,9 @@ Options:
 
 A session's number is the LEADING RUN OF DIGITS of its sidebar title, whatever
 follows: "7:", "7-1:" and "7*:" are all session 7. A leading '*' pins a session,
-which keeps it regardless of number or how far back it sits.
+which keeps it regardless of number or how far back it sits. Both are read from
+the session's most recently written sidebar reference, so adding, changing or
+removing the '*' or the number in one sidebar overrides an older copy elsewhere.
 
 Every sidebar row is decided on every run; nothing is cached between runs.
 Order comes from the last entry INSIDE each transcript, never from file mtime —
@@ -240,6 +264,11 @@ printf '%s\0' "${refs[@]}" |
 
 sort -t"$TAB" -k1,1 -k2,2nr "$TMP/refs.all" |
 	awk -F'\t' '$1 != "" && $1 != prev { print; prev = $1 }' >"$TMP/refs.best"
+
+# mtime \t path for every reference, to find each session's newest write. See
+# THE NEWEST WRITE DECIDES. A reference stat cannot read fails the pipeline, as
+# an unparseable one does above.
+printf '%s\0' "${refs[@]}" | xargs -0 stat -f "%m$TAB%N" >"$TMP/refs.mtime"
 
 n_refs=${#refs[@]}
 n_sessions=$(wc -l <"$TMP/refs.best" | tr -d ' ')
@@ -330,11 +359,14 @@ stamp_titles "$TMP/tx.list" "$TMP/tx.stamped"
 #
 # The key is the session's, shared by all its copies: the transcript's last
 # entry, else the newest copy's .lastActivityAt. The title is the copy's own
-# .title, else the transcript's last custom-title. Rank is 0 for a pinned title,
-# 1 for a numbered one and 2 for anything else. Sessions run newest first, and
-# each session's copies pinned first, then numbered, then the rest, the newest of
-# each kind first. ISO-8601 sorts lexicographically exactly as it sorts
-# chronologically.
+# .title, else the transcript's last custom-title. On a copy written at the
+# session's newest mtime, rank is 0 for a pinned title, 1 for a numbered one and
+# 2 for anything else; every older copy is rank 3. Sessions run newest first,
+# and each session's copies by rank, the highest .lastActivityAt of each rank
+# first. ISO-8601 sorts lexicographically exactly as it sorts chronologically.
+#
+# A copy's rank depends on the session's newest write, which may be any of its
+# copies, so every row is held until all of them have been read.
 
 awk -F'\t' -v OFS='\t' '
 	FILENAME == ARGV[1] {
@@ -344,13 +376,23 @@ awk -F'\t' -v OFS='\t' '
 		next
 	}
 	FILENAME == ARGV[2] { key[$1] = ($1 in ts) ? ts[$1] : $5; next }
+	FILENAME == ARGV[3] { mt[$2] = $1 + 0; next }
 	{
 		title = ($4 != "") ? $4 : (($1 in tt) ? tt[$1] : "")
 		t = title; sub(/^[[:space:]]+/, "", t)
-		rank = (t ~ /^\*/) ? 0 : ((t ~ /^[0-9]/) ? 1 : 2)
-		print key[$1], $1, rank, $2 + 0, $3, title
+		m = mt[$3] + 0
+		if (!($1 in newest) || m > newest[$1]) newest[$1] = m
+		rows++
+		cli[rows] = $1; la[rows] = $2 + 0; ref[rows] = $3; ttl[rows] = title; mtm[rows] = m
+		rk[rows] = (t ~ /^\*/) ? 0 : ((t ~ /^[0-9]/) ? 1 : 2)
 	}
-' "$TMP/tx.stamped" "$TMP/refs.best" "$TMP/refs.all" |
+	END {
+		for (i = 1; i <= rows; i++) {
+			r = (mtm[i] < newest[cli[i]]) ? 3 : rk[i]
+			print key[cli[i]], cli[i], r, la[i], ref[i], ttl[i]
+		}
+	}
+' "$TMP/tx.stamped" "$TMP/refs.best" "$TMP/refs.mtime" "$TMP/refs.all" |
 	sort -t"$TAB" -k1,1r -k2,2 -k3,3n -k4,4nr >"$TMP/sessions"
 
 # ------------------------------------------------------------------ the walk
@@ -398,6 +440,17 @@ while IFS="$TAB" read -r key cli rank la path title; do
 		pending=""
 	fi
 	[ "$kept" -eq 0 ] || continue
+
+	# A copy written before the session's newest copy carries a title that write
+	# replaced, and it keeps nothing. Its title is listed unless a newest copy
+	# already listed the same one. See THE NEWEST WRITE DECIDES.
+	if [ "$rank" -eq 3 ]; then
+		case "$NL$pending" in
+		*"$TAB${title:-(untitled)}$NL"*) ;;
+		*) pend "retitled by a newer write" "${title:-(untitled)}" ;;
+		esac
+		continue
+	fi
 
 	# Strip leading whitespace without forking: chop the run of blanks that
 	# precedes the first non-blank.

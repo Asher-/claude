@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # test-prune-claude-sessions.sh — prove the constraints of
-# plan://claude_desktop/prune_reference_authority against a synthetic store.
+# plan://claude_desktop/prune_reference_authority and
+# plan://claude_desktop/prune_pin_newest_write against a synthetic store.
 #
 # Every test builds a throwaway HOME and points the script at it, so nothing here
 # can touch the real transcript store or the real session store.
@@ -12,12 +13,16 @@
 #
 #   - the number comes from the reference's .title, even when the transcript
 #     says otherwise or its custom-title sits beyond the tail window;
-#   - a session whose reference copies carry different titles is kept if any
-#     copy would keep it;
+#   - a session whose reference copies were written at the same time with
+#     different titles is kept if any of them would keep it;
 #   - a session is decided on every run however old its transcript is and
 #     whatever earlier runs did, and no cache file is read or written;
 #   - a transcript with no reference can never claim a number;
 #   - every dropped row is printed with its reason.
+#
+# The exception is a retitle: a session is decided by its most recently written
+# reference copy, so a '*' or a number removed or changed in one sidebar is not
+# restored from an older copy in another workspace dir.
 #
 # "Never read a whole transcript" is checked by a PATH shim that records a
 # violation if grep, tail or jq is ever handed a .jsonl path.
@@ -161,6 +166,15 @@ mk_ref() {
 	local cli="$1" title="${2:-}" la="${3:-1}" dir="${4:-$WS}"
 	"$REAL_JQ" -nc --arg c "$cli" --arg t "$title" --argjson l "$la" \
 		'{cliSessionId:$c,lastActivityAt:$l,title:$t}' >"$dir/local_$cli.json"
+}
+
+# touch_ref <cli> <iso-ts> [dir]
+#
+# Sets a reference's mtime: when that copy was last WRITTEN, which is what
+# decides a session's pin.
+touch_ref() {
+	local cli="$1" ts="$2" dir="${3:-$WS}"
+	TZ=UTC touch -t "$(touch_stamp "$ts")" "$dir/local_$cli.json"
 }
 
 # run() is invoked as $(run ...), so its body executes in a SUBSHELL and any
@@ -457,9 +471,12 @@ t_relink_shares_one_inode() {
 	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
 	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
 	mk_ref s-keep "1: keep" 5; mk_ref s-drop "" 5
-	# The higher lastActivityAt wins, so WS2's copy is the inode the app is
-	# treated as writing to and the one every dir must end up pointing at.
+	# Both copies were written at the same time, so the higher lastActivityAt
+	# wins: WS2's copy is the inode the app is treated as writing to and the one
+	# every dir must end up pointing at.
 	mk_ref s-keep "1: keep" 9 "$WS2"
+	touch_ref s-keep 2026-09-16T01:00:00.000Z
+	touch_ref s-keep 2026-09-16T01:00:00.000Z "$WS2"
 	local winner; winner="$(stat -f '%i' "$WS2/local_s-keep.json")"
 
 	local out; out="$(run)"
@@ -567,25 +584,32 @@ t_unparseable_reference_aborts_before_unlinking() {
 	drop_store
 }
 
-t_any_copy_can_keep_a_session() {
+t_any_newest_copy_can_keep_a_session() {
 	# Each session below has a reference in two workspace dirs as two inodes whose
-	# titles have drifted apart. Each sidebar shows its own copy, so the session is
-	# kept if any copy would keep it, and every dir ends up sharing that copy.
+	# titles differ but which were written at the same time, so neither is the
+	# newer write. The session is kept if either would keep it, and every dir ends
+	# up sharing that copy.
 	new_store
 	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
 	mk_ref s-newer "4: newer session"
-	# Numbered in one sidebar, unnumbered in the newer copy.
+	# Numbered in one sidebar, unnumbered in the copy with the higher .lastActivityAt.
 	mk_tx s-num 2026-09-16T04:00:00.000Z "" 0 0
 	mk_ref s-num "17: numbered in one sidebar" 5
 	mk_ref s-num "scratch in the other" 9 "$WS2"
-	# Pinned in one sidebar, numbered in the newer copy.
+	# Pinned in one sidebar, numbered in the copy with the higher .lastActivityAt.
 	mk_tx s-pin 2026-09-16T03:00:00.000Z "" 0 0
 	mk_ref s-pin "* pinned in one sidebar" 5
 	mk_ref s-pin "12: numbered in the other" 9 "$WS2"
-	# The newer copy's number is held by a newer session; the older copy's is free.
+	# The higher .lastActivityAt copy's number is held by a newer session; the
+	# other copy's is free.
 	mk_tx s-two 2026-09-16T02:00:00.000Z "" 0 0
 	mk_ref s-two "8: free in one sidebar" 5
 	mk_ref s-two "4: taken in the other" 9 "$WS2"
+	local s
+	for s in s-num s-pin s-two; do
+		touch_ref "$s" 2026-09-16T01:00:00.000Z
+		touch_ref "$s" 2026-09-16T01:00:00.000Z "$WS2"
+	done
 	local num_inode pin_inode two_inode
 	num_inode="$(stat -f '%i' "$WS/local_s-num.json")"
 	pin_inode="$(stat -f '%i' "$WS/local_s-pin.json")"
@@ -594,11 +618,11 @@ t_any_copy_can_keep_a_session() {
 
 	assert_clean_run "$out"
 	assert_contains "$(kept)" "17: numbered in one sidebar" \
-		"a numbered copy keeps the session over a newer unnumbered copy"
+		"a numbered copy keeps the session over an unnumbered one written at the same time"
 	assert_contains "$(kept)" "* pinned in one sidebar" \
-		"a pinned copy keeps the session over a newer numbered copy"
+		"a pinned copy keeps the session over a numbered one written at the same time"
 	assert_contains "$(kept)" "8: free in one sidebar" \
-		"a copy whose number is free keeps the session when the newer copy's number is held"
+		"a copy whose number is free keeps the session when the other's number is held"
 	assert_eq "$(dropped)" "" "no session is dropped"
 	assert_eq "$(stat -f '%i' "$WS2/local_s-num.json")" "$num_inode" \
 		"every dir shares the numbered copy's inode"
@@ -606,6 +630,102 @@ t_any_copy_can_keep_a_session() {
 		"every dir shares the pinned copy's inode"
 	assert_eq "$(stat -f '%i' "$WS2/local_s-two.json")" "$two_inode" \
 		"every dir shares the inode of the copy whose number was free"
+	drop_store
+}
+
+t_newest_write_decides_the_pin() {
+	# Each session below has a reference in two workspace dirs as two inodes, and
+	# the copy written last (by mtime) is the sidebar edit to honour. The older
+	# copy carries the higher .lastActivityAt every time, so it is the write and
+	# not the activity that decides the pin.
+	new_store
+	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
+	mk_ref s-newer "4: newer session"
+	# The newest write removed the '*' and left no number.
+	mk_tx s-unpin 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-unpin "* starred once" 9
+	mk_ref s-unpin "starred once" 5 "$WS2"
+	touch_ref s-unpin 2026-09-16T01:00:00.000Z
+	touch_ref s-unpin 2026-09-16T02:00:00.000Z "$WS2"
+	# The newest write swapped the '*' for a free number.
+	mk_tx s-renum 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-renum "* starred, then numbered" 9
+	mk_ref s-renum "7: starred, then numbered" 5 "$WS2"
+	touch_ref s-renum 2026-09-16T01:00:00.000Z
+	touch_ref s-renum 2026-09-16T02:00:00.000Z "$WS2"
+	# The newest write added the '*'.
+	mk_tx s-pin 2026-09-16T02:00:00.000Z "" 0 0
+	mk_ref s-pin "not yet starred" 9
+	mk_ref s-pin "* starred by the newest write" 5 "$WS2"
+	touch_ref s-pin 2026-09-16T01:00:00.000Z
+	touch_ref s-pin 2026-09-16T02:00:00.000Z "$WS2"
+	local renum_inode pin_inode
+	renum_inode="$(stat -f '%i' "$WS2/local_s-renum.json")"
+	pin_inode="$(stat -f '%i' "$WS2/local_s-pin.json")"
+	local out; out="$(run)"
+
+	assert_clean_run "$out"
+	assert_not_contains "$(kept)" "starred once" \
+		"a session whose newest write removed the '*' is not kept on an older pinned copy"
+	assert_contains "$(dropped)" "* starred once" "the older pinned copy is listed as dropped"
+	assert_contains "$(dropped)" "(retitled by a newer write)" "as retitled by the newer write"
+	assert_contains "$(kept)" "7: starred, then numbered" \
+		"a session whose newest write swapped the '*' for a free number is kept on that number"
+	assert_not_contains "$(kept)" "* starred, then numbered" "and not on its older pinned copy"
+	assert_contains "$(kept)" "* starred by the newest write" \
+		"a session whose newest write added the '*' is kept pinned"
+	local want="local_s-newer.json local_s-pin.json local_s-renum.json "
+	assert_eq "$(listing "$WS")" "$want" "the unpinned session is unlinked from the first dir"
+	assert_eq "$(listing "$WS2")" "$want" "and from the second"
+	assert_eq "$(stat -f '%i' "$WS/local_s-renum.json")" "$renum_inode" \
+		"every dir shares the numbered copy's inode"
+	assert_eq "$(stat -f '%i' "$WS/local_s-pin.json")" "$pin_inode" \
+		"every dir shares the newest pinned copy's inode"
+	drop_store
+}
+
+t_newest_write_decides_the_number() {
+	# As t_newest_write_decides_the_pin, for the number: the copy written last
+	# decides, and the older copy carries the higher .lastActivityAt every time.
+	new_store
+	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
+	mk_ref s-newer "4: newer session"
+	# The newest write removed the number.
+	mk_tx s-unnum 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-unnum "17: numbered once" 9
+	mk_ref s-unnum "numbered once" 5 "$WS2"
+	touch_ref s-unnum 2026-09-16T01:00:00.000Z
+	touch_ref s-unnum 2026-09-16T02:00:00.000Z "$WS2"
+	# The newest write changed a free number to one a newer session holds.
+	mk_tx s-taken 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-taken "8: free before the edit" 9
+	mk_ref s-taken "4: taken by the edit" 5 "$WS2"
+	touch_ref s-taken 2026-09-16T01:00:00.000Z
+	touch_ref s-taken 2026-09-16T02:00:00.000Z "$WS2"
+	# The newest write numbered the session.
+	mk_tx s-num 2026-09-16T02:00:00.000Z "" 0 0
+	mk_ref s-num "not yet numbered" 9
+	mk_ref s-num "12: numbered by the newest write" 5 "$WS2"
+	touch_ref s-num 2026-09-16T01:00:00.000Z
+	touch_ref s-num 2026-09-16T02:00:00.000Z "$WS2"
+	local num_inode; num_inode="$(stat -f '%i' "$WS2/local_s-num.json")"
+	local out; out="$(run)"
+
+	assert_clean_run "$out"
+	assert_not_contains "$(kept)" "numbered once" \
+		"a session whose newest write removed the number is not kept on an older numbered copy"
+	assert_contains "$(dropped)" "17: numbered once" "the older numbered copy is listed as dropped"
+	assert_not_contains "$(kept)" "8: free before the edit" \
+		"a session whose newest write took a held number is not kept on an older copy's free one"
+	assert_contains "$(dropped)" "#4 is held by a newer session" "the newest write's number is the one that lost"
+	assert_contains "$(dropped)" "(retitled by a newer write)" "and the older copies are listed as retitled"
+	assert_contains "$(kept)" "12: numbered by the newest write" \
+		"a session whose newest write numbered it is kept"
+	local want="local_s-newer.json local_s-num.json "
+	assert_eq "$(listing "$WS")" "$want" "the dropped sessions are unlinked from the first dir"
+	assert_eq "$(listing "$WS2")" "$want" "and from the second"
+	assert_eq "$(stat -f '%i' "$WS/local_s-num.json")" "$num_inode" \
+		"every dir shares the newest numbered copy's inode"
 	drop_store
 }
 
@@ -632,25 +752,31 @@ t_fallback_title_without_timestamp() {
 
 t_dropped_session_lists_every_title() {
 	# A session no copy keeps loses a sidebar row in every workspace dir, so each
-	# distinct title its copies carry is listed, with that copy's reason. Copies
-	# sharing a title share one line.
+	# distinct title its copies carry is listed: the newest write's with its
+	# reason, an older copy's as retitled. Copies sharing a title share one line,
+	# whichever write they came from.
 	new_store
 	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
 	mk_ref s-newer "4: newer session"
 	mk_tx s-split 2026-09-16T04:00:00.000Z "" 0 0
 	mk_ref s-split "4: held in one sidebar" 9
 	mk_ref s-split "scratch in the other" 5 "$WS2"
+	touch_ref s-split 2026-09-16T02:00:00.000Z
+	touch_ref s-split 2026-09-16T01:00:00.000Z "$WS2"
 	mk_tx s-same 2026-09-16T03:00:00.000Z "" 0 0
 	mk_ref s-same "same scratch everywhere" 5
 	mk_ref s-same "same scratch everywhere" 9 "$WS2"
+	touch_ref s-same 2026-09-16T02:00:00.000Z
+	touch_ref s-same 2026-09-16T01:00:00.000Z "$WS2"
 	local out; out="$(run --dry-run)"
 
 	assert_clean_run "$out"
-	assert_contains "$(dropped)" "4: held in one sidebar" "the first copy's title is listed"
+	assert_contains "$(dropped)" "4: held in one sidebar" "the newest copy's title is listed"
 	assert_contains "$(dropped)" "#4 is held by a newer session" "with its reason"
-	assert_contains "$(dropped)" "scratch in the other" "the other copy's title is listed too"
+	assert_contains "$(dropped)" "scratch in the other" "the older copy's title is listed too"
+	assert_contains "$(dropped)" "(retitled by a newer write)" "as retitled by the newer write"
 	assert_eq "$(dropped | grep -c 'same scratch everywhere')" "1" \
-		"copies sharing a title are listed once"
+		"an older copy sharing the newest copy's title is listed once"
 	assert_contains "$out" "dropping: 2   (sessions)" "the count is of sessions"
 	drop_store
 }
@@ -703,11 +829,13 @@ t_only_referenced_transcripts_are_read
 t_applied_run_lists_drops
 t_reference_without_session_id_is_decided
 t_unparseable_reference_aborts_before_unlinking
-t_any_copy_can_keep_a_session
+t_any_newest_copy_can_keep_a_session
 t_fallback_title_without_timestamp
 t_stock_bash_constructs_only
 t_dropped_session_lists_every_title
 t_transcripts_are_opened_read_only
+t_newest_write_decides_the_pin
+t_newest_write_decides_the_number
 "
 
 for t in $TESTS; do
