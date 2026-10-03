@@ -729,6 +729,31 @@ t_newest_write_decides_the_number() {
 	drop_store
 }
 
+t_mtime_is_read_with_usr_bin_stat() {
+	# A stat earlier on PATH than /usr/bin — GNU coreutils' reads -f as
+	# --file-system — must not be the one that reads a reference's mtime.
+	new_store
+	cat >"$TH/bin/stat" <<'SHIM'
+#!/bin/bash
+echo "stat: not the stat this script must call" >&2
+exit 1
+SHIM
+	chmod +x "$TH/bin/stat"
+	mk_tx s-newer 2026-09-16T05:00:00.000Z "" 0 0
+	mk_ref s-newer "4: newer session"
+	mk_tx s-unpin 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-unpin "* starred once" 9
+	mk_ref s-unpin "starred once" 5 "$WS2"
+	touch_ref s-unpin 2026-09-16T01:00:00.000Z
+	touch_ref s-unpin 2026-09-16T02:00:00.000Z "$WS2"
+	local out; out="$(run --dry-run)"
+
+	assert_clean_run "$out"
+	assert_contains "$(dropped)" "* starred once" \
+		"the newest write still decides with another stat first on PATH"
+	drop_store
+}
+
 t_fallback_title_without_timestamp() {
 	# A transcript holding a custom-title and no timestamp anywhere, behind a
 	# reference with no .title. The title still reaches the reference, and the
@@ -836,6 +861,7 @@ t_dropped_session_lists_every_title
 t_transcripts_are_opened_read_only
 t_newest_write_decides_the_pin
 t_newest_write_decides_the_number
+t_mtime_is_read_with_usr_bin_stat
 "
 
 for t in $TESTS; do

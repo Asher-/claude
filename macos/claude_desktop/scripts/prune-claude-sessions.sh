@@ -268,7 +268,7 @@ sort -t"$TAB" -k1,1 -k2,2nr "$TMP/refs.all" |
 # mtime \t path for every reference, to find each session's newest write. See
 # THE NEWEST WRITE DECIDES. A reference stat cannot read fails the pipeline, as
 # an unparseable one does above.
-printf '%s\0' "${refs[@]}" | xargs -0 stat -f "%m$TAB%N" >"$TMP/refs.mtime"
+printf '%s\0' "${refs[@]}" | xargs -0 /usr/bin/stat -f "%m$TAB%N" >"$TMP/refs.mtime"
 
 n_refs=${#refs[@]}
 n_sessions=$(wc -l <"$TMP/refs.best" | tr -d ' ')
