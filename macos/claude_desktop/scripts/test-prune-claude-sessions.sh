@@ -754,6 +754,56 @@ SHIM
 	drop_store
 }
 
+t_nothing_kept_refuses_to_unlink() {
+	# A store in which every session is dropped is refused before staging.
+	new_store
+	mk_tx s-a 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-a "scratch one"
+	mk_ref s-a "scratch one" 1 "$WS2"
+	local out; out="$(run)"
+
+	assert_eq "$(run_rc)" "1" "a run that would keep nothing exits 1"
+	assert_contains "$out" "nothing to keep" "and says why"
+	assert_eq "$(listing "$WS")$(listing "$WS2")" "local_s-a.json local_s-a.json " \
+		"and unlinks nothing"
+	drop_store
+}
+
+t_keepers_are_copied_when_ln_fails() {
+	# ln failing (a cross-device stash) falls back to cp -p for staging and, per
+	# file, for the relink; every dir still holds the keeper and nothing else.
+	new_store
+	printf '#!/bin/bash\nexit 1\n' >"$TH/bin/ln"; chmod +x "$TH/bin/ln"
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_tx s-drop 2026-09-16T03:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"; mk_ref s-keep "1: keep" 1 "$WS2"
+	mk_ref s-drop "scratch"; mk_ref s-drop "scratch" 1 "$WS2"
+	local out; out="$(run)"
+
+	assert_clean_run "$out"
+	assert_contains "$out" "cross-device, had to copy local_s-keep.json" "staging falls back to cp"
+	assert_eq "$(listing "$WS")" "local_s-keep.json " "the first dir holds the keeper only"
+	assert_eq "$(listing "$WS2")" "local_s-keep.json " "and so does the second"
+	assert_eq "$("$REAL_JQ" -r .title "$WS2/local_s-keep.json")" "1: keep" "the copied keeper is intact"
+	drop_store
+}
+
+t_no_keeper_staged_refuses_to_unlink() {
+	# When neither ln nor cp can stage any keeper, nothing is unlinked.
+	new_store
+	printf '#!/bin/bash\nexit 1\n' >"$TH/bin/ln"; chmod +x "$TH/bin/ln"
+	printf '#!/bin/bash\nexit 1\n' >"$TH/bin/cp"; chmod +x "$TH/bin/cp"
+	mk_tx s-keep 2026-09-16T04:00:00.000Z "" 0 0
+	mk_ref s-keep "1: keep"; mk_ref s-keep "1: keep" 1 "$WS2"
+	local out; out="$(run)"
+
+	assert_eq "$(run_rc)" "1" "a run that staged no keeper exits 1"
+	assert_contains "$out" "no keeper could be staged" "and says why"
+	assert_eq "$(listing "$WS")$(listing "$WS2")" "local_s-keep.json local_s-keep.json " \
+		"and unlinks nothing"
+	drop_store
+}
+
 t_fallback_title_without_timestamp() {
 	# A transcript holding a custom-title and no timestamp anywhere, behind a
 	# reference with no .title. The title still reaches the reference, and the
@@ -862,6 +912,9 @@ t_transcripts_are_opened_read_only
 t_newest_write_decides_the_pin
 t_newest_write_decides_the_number
 t_mtime_is_read_with_usr_bin_stat
+t_nothing_kept_refuses_to_unlink
+t_keepers_are_copied_when_ln_fails
+t_no_keeper_staged_refuses_to_unlink
 "
 
 for t in $TESTS; do
